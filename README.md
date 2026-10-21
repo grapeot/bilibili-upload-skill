@@ -27,7 +27,7 @@
 
 ## 状态
 
-当前是脚手架版本：文档、结构和安全规则已确定，命令行实现正在进行中。各部分的实现状态见 `skills/bilibili-upload/SKILL.md`。
+v0.1：命令行已实现，元数据校验、执行计划和点击守卫有离线测试。页面选择器依赖 B 站当前的投稿页结构，改版后可能需要更新。命令参考和各部分的实现状态见 `skills/bilibili-upload/SKILL.md`。
 
 ## 安装
 
@@ -41,6 +41,17 @@ python -m pytest -q
 ```
 
 本工具连接系统 Chrome，不需要运行 `playwright install` 下载浏览器。
+
+## 快速上手
+
+```bash
+bili-upload open                                  # 启动可见 Chrome，扫码登录
+bili-upload status                                # logged_in 应为 true
+bili-upload fill --meta upload.json               # dry-run，看计划
+bili-upload fill --meta upload.json --execute     # 选视频、填表，停在提交前
+```
+
+元数据格式见 `skills/bilibili-upload/SKILL.md`。
 
 ## 许可
 
