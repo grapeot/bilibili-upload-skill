@@ -9,7 +9,7 @@ description = "Agent skill + CLI: fill the Bilibili upload form in a visible Chr
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
-dependencies = ["playwright>=1.45"]
+dependencies = ["playwright>=1.51"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

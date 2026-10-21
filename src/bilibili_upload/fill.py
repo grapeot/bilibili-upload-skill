@@ -45,8 +45,8 @@ class Form:
         self.skipped.append({"step": step, "reason": reason})
 
     def run(self, step: str, fn) -> None:
-        dismiss_dialogs(self)
         try:
+            dismiss_dialogs(self)
             ok = fn()
             if ok is False:
                 if not any(s["step"] == step for s in self.skipped):
@@ -57,25 +57,27 @@ class Form:
         except Exception as e:  # noqa: BLE001 - 每一步独立失败，汇总报告
             msg = str(e).splitlines()[0][:200] if str(e) else ""
             self.skip(step, f"{type(e).__name__}: {msg}")
-            close_own_dialogs(self)
+            try:
+                close_own_dialogs(self)
+            except Exception:  # noqa: BLE001
+                pass
 
 
-def visible_dialogs(page) -> list[tuple[Any, str]]:
-    loc = page.locator(css("dialog"))
+def visible_dialog_handles(page) -> list[tuple[Any, str]]:
+    """可见弹窗的 ElementHandle 与文字。用句柄而不是 nth()，避免弹窗增减时点错对象。"""
     out = []
-    for i in range(loc.count()):
-        d = loc.nth(i)
+    for h in page.locator(css("dialog")).element_handles():
         try:
-            if d.is_visible():
-                out.append((d, re.sub(r"\s+", " ", d.inner_text(timeout=2000)).strip()))
+            if h.is_visible():
+                out.append((h, re.sub(r"\s+", " ", h.inner_text()).strip()))
         except Exception:  # noqa: BLE001 - 弹窗在检查过程中消失
             continue
     return out
 
 
-def _close_dialog(dialog) -> bool:
-    x = dialog.locator(css("dialog_close"))
-    if not x.count():
+def _close_dialog(handle) -> bool:
+    x = handle.query_selector(css("dialog_close"))
+    if x is None:
         return False
     safe_click(x)
     return True
@@ -83,10 +85,10 @@ def _close_dialog(dialog) -> bool:
 
 def dismiss_dialogs(form: Form) -> None:
     """关掉已知无害的弹窗（用 x，不点「知道了」）；其他可见弹窗按文字报告，不动它。"""
-    for dialog, text in visible_dialogs(form.page):
+    for handle, text in visible_dialog_handles(form.page):
         if any(t in text for t in BENIGN_DIALOG_TEXTS):
             try:
-                if _close_dialog(dialog):
+                if _close_dialog(handle):
                     form.page.wait_for_timeout(500)
                     continue
             except Exception:  # noqa: BLE001
@@ -100,24 +102,23 @@ def dismiss_dialogs(form: Form) -> None:
 
 def close_own_dialogs(form: Form) -> None:
     """步骤失败后，用 x 关掉本工具打开的弹窗，免得挡住后续步骤。"""
-    for dialog, text in visible_dialogs(form.page):
+    for handle, text in visible_dialog_handles(form.page):
         if any(t in text for t in OWN_DIALOG_TEXTS):
             try:
-                _close_dialog(dialog)
+                _close_dialog(handle)
                 form.page.wait_for_timeout(500)
             except Exception:  # noqa: BLE001
                 pass
 
 
 def _dialog_with(page, marker: str, timeout_ms: float = 10000):
-    """等待并返回文字含 marker 的可见弹窗。"""
-    deadline = time.monotonic() + timeout_ms / 1000
-    while time.monotonic() < deadline:
-        for dialog, text in visible_dialogs(page):
-            if marker in text:
-                return dialog
-        page.wait_for_timeout(300)
-    return None
+    """等待并返回文字含 marker 的可见弹窗（按文字筛选的 Locator，不依赖位置）。"""
+    loc = page.locator(css("dialog")).filter(has_text=marker).filter(visible=True).first
+    try:
+        loc.wait_for(state="visible", timeout=timeout_ms)
+        return loc
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _clear_and_type_quill(page, editor_locator, text: str) -> None:
@@ -281,16 +282,18 @@ def step_tags(form: Form, meta: UploadMeta):
         return False
     # B 站会按内容自动带入标签：先删掉元数据之外的标签
     for _ in range(20):
-        existing = read_tags(form.page)
+        existing = [t.strip() for t in form.page.locator(css("tag_item")).all_inner_texts()]  # 不丢空项，保持下标对齐
         extra = [i for i, t in enumerate(existing) if t not in meta.tags]
         if not extra:
             break
-        closes = form.page.locator(css("tag_close"))
-        if closes.count() != len(existing):
+        closes = form.page.locator(css("tag_close")).element_handles()
+        if len(closes) != len(existing):
             form.mark_missing("tag_close")
             raise RuntimeError("cannot locate the delete button of each existing tag")
-        safe_click(closes.nth(extra[0]))
+        safe_click(closes[extra[0]])
         form.page.wait_for_timeout(300)
+    else:
+        raise RuntimeError(f"could not remove auto-filled tags: {[t for t in read_tags(form.page) if t not in meta.tags]}")
     for tag in meta.tags:
         if tag in read_tags(form.page):
             continue
@@ -348,10 +351,12 @@ def step_subtitles(form: Form, meta: UploadMeta):
     if btn is None:
         return False
     safe_click(btn)
-    dialog = form.find("subtitle_dialog", timeout=10000)
-    if dialog is None:
+    dialog = form.page.locator(css("subtitle_dialog")).filter(visible=True).first
+    try:
+        dialog.wait_for(state="visible", timeout=10000)
+    except Exception:  # noqa: BLE001
+        form.mark_missing("subtitle_dialog")
         return False
-    dialog = dialog.first
     lang = form.find("subtitle_lang", root=dialog)
     if lang is None:
         return False
@@ -368,8 +373,9 @@ def step_subtitles(form: Form, meta: UploadMeta):
     chooser = fc.value
     accept = (chooser.element.get_attribute("accept") or "").lower()
     name = chooser.element.get_attribute("name") or ""
-    if name == "buploader" or ".mp4" in accept:
-        raise RuntimeError(f"file chooser looks like the video uploader (accept={accept!r}, name={name!r})")
+    inside = chooser.element.evaluate("(el, d) => d.contains(el)", dialog.element_handle())
+    if not inside or name == "buploader" or (accept and ".srt" not in accept):
+        raise RuntimeError(f"file chooser is not the subtitle input (inside_dialog={inside}, accept={accept!r}, name={name!r})")
     chooser.set_files(str(meta.subtitles.path))  # 字幕是小文件
     confirm = dialog.locator(css("subtitle_confirm")).filter(has_text="确认")
     if not confirm.count():
@@ -387,7 +393,7 @@ def step_subtitles(form: Form, meta: UploadMeta):
 
 
 def chapters_text(meta: UploadMeta) -> str:
-    """章节文本编辑器接受的格式：每行「MM:SS 标题」。"""
+    """章节文本编辑器接受的格式：每行「MM:SS 标题」（超过 1 小时为 HH:MM:SS）。"""
     return "\n".join(f"{c.timestamp} {c.title}" for c in meta.chapters)
 
 
@@ -404,6 +410,8 @@ def step_chapters(form: Form, meta: UploadMeta):
     safe_click(btn)
     if form.find("chapter_iframe", timeout=15000) is None:
         return False
+    # iframe 内的元素同样经过守卫；守卫的 DOM 检查只看得到 iframe 自己的文档，
+    # 跨文档的遮挡由 Playwright 点击前的命中检查兜底。
     frame = form.page.locator(css("chapter_iframe")).first.element_handle().content_frame()
     if frame is None:
         raise RuntimeError("chapter iframe has no frame")
@@ -531,7 +539,7 @@ def compare(got: dict[str, Any], meta: UploadMeta) -> tuple[dict[str, Any], list
             cmp(key, (v or "").strip() == meta.partition, meta.partition)
         elif key == "tags":
             page_tags = v or []
-            ok = all(t in meta.tags for t in page_tags) and [t for t in meta.tags if t in page_tags] == page_tags
+            ok = all(t in meta.tags for t in page_tags)  # 不比较顺序：自动带入且在元数据里的标签保留原位
             cmp(key, ok, meta.tags)
         elif key == "description":
             cmp(key, _norm_text(v) == _norm_text(meta.description), "(see metadata)")

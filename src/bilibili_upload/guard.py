@@ -202,6 +202,9 @@ def focus_verdict(report: dict[str, Any], enter: bool = False) -> str | None:
 
 
 def _pin(locator, timeout: float):
+    if not hasattr(locator, "first"):  # 已经是 ElementHandle：直接用这个元素
+        locator.wait_for_element_state("visible", timeout=timeout)
+        return locator
     target = locator.first
     target.wait_for(state="visible", timeout=timeout)
     handle = target.element_handle(timeout=timeout)

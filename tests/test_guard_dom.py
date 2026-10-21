@@ -128,3 +128,21 @@ def test_cover_confirm_exception_is_scoped(page):
     for sel in ("#otherok", "#mixok"):  # 别的弹窗、或弹窗里出现提交字样：仍拒绝
         with pytest.raises(ForbiddenClick):
             safe_click(page.locator(sel))
+
+
+def test_dismiss_dialogs_closes_benign_and_reports_unknown(page):
+    from bilibili_upload.fill import Form, dismiss_dialogs
+
+    ctx = page.context.browser.new_context()
+    pg = ctx.new_page()
+    pg.set_content("""
+      <div class="bcc-dialog" id="notice"><span class="bcc-dialog__close" onclick="this.parentElement.remove()">x</span>
+        开启后视频上传完成第一时间通知 <button onclick="window.ack=1">知道了</button></div>
+      <div class="bcc-dialog" id="mystery"><span class="bcc-dialog__close" onclick="window.closedMystery=1">x</span>账号异常提醒</div>
+    """)
+    form = Form(pg)
+    dismiss_dialogs(form)
+    assert pg.locator("#notice").count() == 0
+    assert pg.evaluate("window.ack") is None and pg.evaluate("window.closedMystery") is None
+    assert any("账号异常提醒" in t for t in form.unknown_dialogs)
+    ctx.close()
