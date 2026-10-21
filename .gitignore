@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+dist/
+build/
+.DS_Store
+
+# 浏览器 profile、登录态只留在本机，永不提交
+.local/
+*profile*/
+user-data*/
+.chrome*/
+Cookies
+Cookies-journal
+*cookies*.json
+*cookies*.txt
+*storage-state*.json
+.env
+*.env
+
+# 截图、DOM 快照、trace、日志
+*.log
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.heic
+*.avif
+*.html
+*.mhtml
+*.har
+trace*.zip
+test-results/
+playwright-report/
+
+# 视频、音频、字幕
+*.mp4
+*.mov
+*.mkv
+*.flv
+*.webm
+*.avi
+*.ts
+*.m4v
+*.mp3
+*.m4a
+*.wav
+*.srt
+*.vtt
+*.ass
+*.ssa
+
+# 投稿元数据可能含个人信息：仓库里只允许测试夹具和示例
+*.json
+!tests/fixtures/*.json
+!examples/*.example.json
