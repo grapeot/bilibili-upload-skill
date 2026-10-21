@@ -73,13 +73,29 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 | `visibility` | 否 | `public` 或 `self` | 默认 `public`；首次在新账号上演练建议用 `self` |
 | `dynamic` | 否 | 至多 233 字 | 粉丝动态文字 |
 
+## 命令参考
+
+所有命令向 stdout 输出一个 JSON 对象。全局参数 `--port`（默认 `$BILI_CDP_PORT` 或 9341）、`--profile-dir`（默认 `$BILI_PROFILE_DIR` 或 `~/.bilibili-upload/browser-profile`）。
+
+| 命令 | 作用 | 是否改动页面 |
+|---|---|---|
+| `open [--url URL]` | 启动可见 Chrome；端口或 profile 被占用时拒绝 | 启动浏览器 |
+| `status` | 浏览器是否在线、`logged_in` 是否为 `true` | 只读 |
+| `fill --meta M` | 校验元数据并输出执行计划 | 不碰浏览器 |
+| `fill --meta M --execute` | 新开标签页、选视频（开始上传）、填表、等待上传、读回核对 | 填表，不提交 |
+| `fill --meta M --execute --reuse-tab` | 接入已选好视频的投稿标签页继续填，不再选文件，不会重复上传 | 填表，不提交 |
+| `readback --meta M` | 读回当前投稿标签页并与元数据比对 | 只读 |
+| `selectors` | 列出所有选择器；浏览器在线时统计当前投稿页的匹配数 | 只读 |
+
+`fill --execute` 的其他参数：`--upload-timeout 秒数`（默认 1800）、`--no-wait`（不等上传完成）。
+
 ## 实现状态
 
 | 部分 | 状态 |
 |---|---|
-| 元数据校验、执行计划、点击守卫 | 计划中（v0.1） |
-| `open` / `status` | 计划中（v0.1） |
-| `fill --execute` | 计划中（v0.1）；选择器需要在真实新投稿页上验证 |
+| 元数据校验、执行计划、点击守卫 | 已实现，有离线测试 |
+| `open` / `status` / `readback` / `selectors` | 已实现 |
+| `fill --execute` | 已实现；选择器以真实新投稿页为准，B 站改版后可能需要更新 |
 
 ## 故障排查
 
