@@ -33,7 +33,7 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 1. 跑 `status`。`logged_in` 不是 `true` 时，跑 `open`（或让人在已打开的窗口里登录），等人扫码后再跑一次 `status`。
 2. 准备元数据 JSON（格式见下文），跑 dry-run，把计划给人看。重点核对：视频路径、标题、分区、创作声明、可见范围。
 3. 确认上传授权后跑 `--execute`。命令会等视频上传和处理推进到可以提交的程度（或超时），然后把每个字段读回来比对。
-4. 读结果 JSON：`filled`（已填）、`skipped`（跳过及原因）、`missing_selectors`（页面上找不到的选择器）、`mismatches`（读回与预期不符）、`upload`（上传状态）、`human_steps`（需要人做的事）。把这些如实转告人。
+4. 读结果 JSON：`filled`（已填）、`skipped`（跳过及原因）、`missing_selectors`（页面上找不到的选择器）、`unknown_dialogs`（工具不认识、没有关闭的弹窗文字）、`warnings` 与 `tags_not_accepted`（B 站静默拒收的标签）、`mismatches`（读回与预期不符）、`upload`（上传状态）、`human_steps`（需要人做的事）。把这些如实转告人。
 5. 请人在浏览器里核对并亲手点「立即投稿」。
 
 ## 元数据格式
@@ -44,7 +44,8 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 {
   "video": "/path/to/video.mp4",
   "title": "视频标题",
-  "cover": "cover.jpg",
+  "cover": "cover_16x9.jpg",
+  "cover_4x3": "cover_4x3.jpg",
   "creation_statement": "内容无需标注",
   "partition": "知识",
   "tags": ["标签一", "标签二"],
@@ -63,13 +64,14 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 |---|---|---|---|
 | `video` | 是 | 文件存在 | 视频文件路径 |
 | `title` | 是 | 1 到 80 字 | 会先清空 B 站自动带入的文件名 |
-| `cover` | 否 | jpg / png，文件存在 | 封面图；不填则保留 B 站自动截取的封面 |
+| `cover` | 否 | jpg / png，文件存在 | 16:9 封面（个人空间封面）；不填则保留 B 站自动截取的封面 |
+| `cover_4x3` | 否 | jpg / png，文件存在 | 4:3 封面（首页推荐封面）；不填时用 `cover`，B 站会把 16:9 图裁掉两侧 |
 | `creation_statement` | 是 | 页面上的选项原文 | 如「内容无需标注」「含AI生成内容」「个人观点，仅供参考」。添加后不可编辑 |
 | `partition` | 否 | 页面上的分区显示名 | 不填则保留 B 站推荐的分区 |
 | `tags` | 否 | 至多 10 个，每个至多 20 字，不重复 | 逐个输入并回车 |
 | `description` | 否 | 至多 2000 字 | `\n` 换行 |
-| `chapters` | 否 | `start` 递增，第一个为 0 | `start` 可以是秒数或 `MM:SS` / `HH:MM:SS`；页面不支持章节时记入 `skipped` |
-| `subtitles` | 否 | 只接受 `.srt` | `default_on` 默认 `false`；页面若没有默认开关，记入 `human_steps` |
+| `chapters` | 否 | 第一个从 0 开始，相邻至少相隔 5 秒；标题至多 16 字（英文字母也按 1 字计） | `start` 可以是秒数或 `MM:SS` / `HH:MM:SS`；通过章节文本编辑器按「MM:SS 标题」逐行录入 |
+| `subtitles` | 否 | 只接受 `.srt` | `language` 为弹窗里的语言选项原文（默认「中文」）。投稿表单没有「对观众默认开启/关闭」的设置，`default_on: false` 只会在 `human_steps` 里提醒投稿后检查 |
 | `visibility` | 否 | `public` 或 `self` | 默认 `public`；首次在新账号上演练建议用 `self` |
 | `dynamic` | 否 | 至多 233 字 | 粉丝动态文字 |
 
@@ -97,17 +99,21 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 
 | 部分 | 状态 |
 |---|---|
-| 元数据校验、执行计划、点击守卫 | 已实现，有离线测试 |
-| `open` / `status` / `readback` / `selectors` | 已实现 |
-| `fill --execute` | 已实现；选择器以真实新投稿页为准，B 站改版后可能需要更新 |
+| 元数据校验、执行计划、点击守卫、读回比对 | 已实现，有离线测试（含无头 Chrome 的守卫 DOM 用例） |
+| `open` / `status` / `readback` / `selectors` | 已实现，已在真实页面使用 |
+| 选视频（拦截文件选择框） | 已实现，流程在真实页面验证过 |
+| 标题、封面、创作声明、分区、标签、简介、可见范围、字幕、章节、粉丝动态 | 按真实新投稿页（2026-10）的结构实现，各步骤的页面交互在真实页面上逐项验证过；本工具的完整 `--execute` 流程还没有端到端跑通过一次，第一次使用时请盯着窗口看 |
 
-## 已知限制与坑
+## 真实页面要点（2026-10）
 
-- **大文件不能用 Playwright 的 `set_input_files`。** 通过 `connect_over_cdp` 接入的浏览器在 Playwright 看来是远程浏览器，`set_input_files` 会把文件内容经 CDP 传过去，上限 50 MB，真实视频几乎都超过，报错为 `Cannot transfer files larger than 50Mb to a browser not co-located with the server`。直接对输入框调用 CDP `DOM.setFileInputFiles` 也不行：调用成功，但 B 站的上传组件不响应。本工具的做法是开启 `Page.setInterceptFileChooserDialog`，经守卫点击 `.upload-area`（内部的 `.upload-btn` 不接收点击），收到 `Page.fileChooserOpened` 后对其 `backendNodeId` 调用 `DOM.setFileInputFiles`，只传本机绝对路径，由 Chrome 自己从磁盘读取。前提是 Chrome 和本工具在同一台机器上。
-- 选好视频后，标题框会自动带入去掉扩展名的文件名。`--reuse-tab` 据此（或上传条目里的文件名、或已填好的标题）找到对应的标签页。
-- 选文件之前出错时，`fill --execute` 会关掉自己新开的标签页，不留空的投稿页。
-- 章节编辑还没有自动化，执行结果会把章节列在 `human_steps` 里。
-- 字幕默认开关、字幕语言、封面最终效果需要人在页面上确认。
+- 选完视频后会弹出「开启后视频上传完成第一时间通知」弹窗，挡住所有字段。工具在每一步之前用右上角 x（`.bcc-dialog__close`）关掉它，不点「知道了」（可能触发浏览器通知授权）。其他不认识的弹窗不动，文字写进 `unknown_dialogs`。
+- B 站会按内容自动带入标签（例如「前端」「JavaScript」）并自动选一个分区。工具先删掉元数据之外的标签，再逐个添加；有的标签会被静默拒收，没有任何提示，工具读回后列在 `tags_not_accepted`，不算失败。
+- 分区是一级列表（例如「人工智能」「科技数码」），没有二级分区。
+- 「更多设置」开关的文字不在单个叶子节点上，用 `span.label:has(span.des)` 定位。
+- 封面在「封面制作」弹窗里，有「首页推荐封面（4:3）」和「个人空间封面（16:9）」两个位置，分别点选后上传。弹窗的「完成」按钮类名带 `submit`，守卫对它有限定范围的放行（只在「封面制作」弹窗内、文字恰为「完成」时），页面级的「立即投稿」「存草稿」照样拒绝。
+- 字幕：「上传字幕」弹窗里先选语言，再选 `.srt` 文件，「确认」在选好文件后才可用。完成后区域显示「已上传【中文】字幕」。
+- 章节：「编辑章节」打开的弹窗内容是一个播放器 iframe。切到「章节文本编辑器」，每行写「MM:SS 标题」，点「转换成章节列表」，再点「保存」。标题超过 16 字时页面提示「请保证章节名称字数不超过16字」。完成后区域显示「已配置章节」。弹窗里的「播放器默认展示章节」保持不勾选。
+- 新投稿页底部同时有「存草稿」和「立即投稿」，两者都只由人点击。
 
 ## 故障排查
 

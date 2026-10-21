@@ -28,6 +28,12 @@ HTML = """
   <div class="tag-wrap"><span>新人投稿</span><input id="tag" class="input-val"></div>
   <div class="desc"><div class="ql-editor" contenteditable="true" id="ed2"><p>欢迎投稿</p></div></div>
   <input type="file" id="fileinput" accept=".mp4,.flv" style="display:none">
+  <div class="bcc-dialog" id="coverdlg"><div class="bcc-dialog__title">封面制作</div>
+    <div class="cover-editor-content"><div class="cover-editor-button"><div class="button submit" id="coverok">完成</div></div></div></div>
+  <div class="bcc-dialog" id="otherdlg"><div>别的弹窗</div>
+    <div class="cover-editor-content"><div class="cover-editor-button"><div class="button submit" id="otherok">完成</div></div></div></div>
+  <div class="bcc-dialog" id="mixdlg"><div>封面制作 立即投稿</div>
+    <div class="cover-editor-content"><div class="cover-editor-button"><div class="button submit" id="mixok">完成</div></div></div></div>
   <div id="cover" style="position:relative;width:200px;height:40px">covered
     <div class="submit-add" style="position:absolute;inset:0;background:#fff">立即投稿</div></div>
 </div></body></html>
@@ -115,3 +121,10 @@ def test_select_file_via_chooser_checks_accept(page, tmp_path):
     f.write_text("x")
     with pytest.raises(RuntimeError):
         select_file_via_chooser(page, page.locator("#ua"), f, ".srt")
+
+
+def test_cover_confirm_exception_is_scoped(page):
+    safe_click(page.locator("#coverok"))  # 「封面制作」弹窗里的「完成」放行
+    for sel in ("#otherok", "#mixok"):  # 别的弹窗、或弹窗里出现提交字样：仍拒绝
+        with pytest.raises(ForbiddenClick):
+            safe_click(page.locator(sel))

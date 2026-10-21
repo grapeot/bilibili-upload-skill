@@ -50,6 +50,8 @@ def test_tag_rules(write_meta, good_meta, tags, needle):
     ([{"start": "1:99", "title": "a"}], "bad timestamp"),
     ([{"start": 0}], "needs start and title"),
     ([{"start": 0, "title": " "}], "empty title"),
+    ([{"start": 0, "title": "a" * 17}], "17 chars > 16"),
+    ([{"start": 0, "title": "a"}, {"start": 4, "title": "b"}], "at least 5 s apart"),
 ])
 def test_chapter_rules(write_meta, good_meta, chapters, needle):
     good_meta["chapters"] = chapters
@@ -97,3 +99,10 @@ def test_parse_timestamp_rejects(value):
 def test_format_timestamp():
     assert format_timestamp(229.4) == "03:49"
     assert format_timestamp(3723) == "01:02:03"
+
+
+def test_cover_4x3_optional(write_meta, good_meta, media):
+    (media / "cover43.png").write_bytes(b"\x89PNG")
+    good_meta["cover_4x3"] = "cover43.png"
+    meta = load_meta(write_meta(good_meta))
+    assert meta.cover_4x3.name == "cover43.png" and meta.cover.name == "cover.jpg"

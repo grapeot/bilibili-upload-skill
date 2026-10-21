@@ -11,6 +11,10 @@
 - 若在 <label> 里，label 关联的控件（元素和命中元素都查）。
 任何一项像提交或存草稿，就抛出 ForbiddenClick，不点击。宁可误拒，不可误点。
 
+唯一的放行例外定义在 selectors.GUARD_EXCEPTIONS：「封面制作」弹窗里文字恰为「完成」的
+`.button.submit`。放行只忽略这个元素自身的类名，文字、祖先、命中点等检查照常进行；
+所在弹窗若包含「立即投稿」或「存草稿」字样，放行失效。
+
 按键前，守卫要求焦点在预期的可编辑元素上；按回车时还要求它不在任何 <form> 里
 （回车可能触发表单的隐式提交；填值和插入文字不会提交，不受这条限制）。
 """
@@ -18,6 +22,8 @@
 from __future__ import annotations
 
 from typing import Any
+
+from .selectors import GUARD_EXCEPTIONS
 
 # 元素文字里出现这些词就拒绝点击
 FORBIDDEN_TEXTS = ("立即投稿", "存草稿", "保存草稿", "草稿", "提交", "投稿", "发布")
@@ -31,7 +37,19 @@ const FORBID_CLS = %(cls)s;
 const FORBID_TXT = %(txt)s;
 const hasWord = (t) => FORBID_TXT.some(w => t.includes(w));
 const SUBMIT_CSS = %(submit)s;
-const clsOf = (e) => (e && (typeof e.className === 'string' ? e.className : (e.getAttribute && e.getAttribute('class')) || '')) || '';
+const EXC = %(exc)s;
+let EXC_EL = null;  // 命中限定放行规则的元素：只忽略它自己的类名，文字等其他检查照常
+const clsOf = (e) => (e && e !== EXC_EL && (typeof e.className === 'string' ? e.className : (e.getAttribute && e.getAttribute('class')) || '')) || '';
+const matchException = (e) => {
+  for (const ex of EXC) {
+    if (!e.matches || !e.matches(ex.css) || (e.innerText || '').trim() !== ex.text) continue;
+    const dlg = e.closest('.bcc-dialog');
+    if (!dlg) continue;
+    const dt = dlg.innerText || '';
+    if (dt.includes(ex.dialog_text) && !dt.includes('立即投稿') && !dt.includes('存草稿')) return e;
+  }
+  return null;
+};
 const parentOf = (e) => e.parentElement || (e.getRootNode && e.getRootNode().host) || null;
 const TEXT_INPUTS = ['', 'text', 'search', 'email', 'url', 'number', 'tel', 'password'];
 const isEditable = (e) => {
@@ -65,6 +83,7 @@ const containsSubmit = (e) => {
 """
 
 _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
+  EXC_EL = matchException(el);
   // 祖先里任何「短文字含禁词」或「可点击且文字含禁词」的元素都视为提交按钮（div/span 拼成的按钮）
   const EDITABLE_CSS = 'input:not([type]), input[type=text], input[type=search], input[type=email], input[type=url], ' +
     'input[type=number], input[type=tel], input[type=password], textarea, [contenteditable=""], [contenteditable="true"]';
@@ -107,6 +126,7 @@ _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
       if (containsSubmit(hctl)) out.containsSubmit = true;
     }
   }
+  out.exception = !!EXC_EL;
   return out;
 }"""
 
@@ -123,7 +143,8 @@ def _js(template: str) -> str:
     import json
 
     return template % {"cls": json.dumps(list(FORBIDDEN_CLASS_FRAGMENTS)), "submit": json.dumps(SUBMIT_CSS),
-                       "txt": json.dumps(list(FORBIDDEN_TEXTS), ensure_ascii=False)}
+                       "txt": json.dumps(list(FORBIDDEN_TEXTS), ensure_ascii=False),
+                       "exc": json.dumps(list(GUARD_EXCEPTIONS), ensure_ascii=False)}
 
 
 INSPECT_CLICK_JS = _js(_INSPECT_CLICK_JS)

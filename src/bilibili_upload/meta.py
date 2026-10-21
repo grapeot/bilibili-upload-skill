@@ -14,11 +14,13 @@ TAGS_MAX = 10
 TAG_MAX = 20
 DESC_MAX = 2000
 DYNAMIC_MAX = 233
+CHAPTER_TITLE_MAX = 16  # B 站：请保证章节名称字数不超过16字（英文字母也按 1 字计）
+CHAPTER_MIN_GAP_S = 5
 VIDEO_EXTS = {".mp4", ".flv", ".avi", ".wmv", ".mov", ".webm", ".mpeg4", ".ts", ".mpg", ".rm", ".rmvb", ".mkv", ".m4v"}
 COVER_EXTS = {".jpg", ".jpeg", ".png"}
 VISIBILITIES = ("public", "self")
 KNOWN_KEYS = {
-    "video", "title", "cover", "creation_statement", "partition", "tags", "description",
+    "video", "title", "cover", "cover_4x3", "creation_statement", "partition", "tags", "description",
     "chapters", "subtitles", "visibility", "dynamic",
 }
 
@@ -54,6 +56,7 @@ class UploadMeta:
     title: str
     creation_statement: str
     cover: Path | None = None
+    cover_4x3: Path | None = None
     partition: str | None = None
     tags: list[str] = field(default_factory=list)
     description: str = ""
@@ -67,6 +70,7 @@ class UploadMeta:
             "video": str(self.video),
             "title": self.title,
             "cover": str(self.cover) if self.cover else None,
+            "cover_4x3": str(self.cover_4x3) if self.cover_4x3 else None,
             "creation_statement": self.creation_statement,
             "partition": self.partition,
             "tags": self.tags,
@@ -157,6 +161,9 @@ def parse_meta(data: dict[str, Any], base_dir: Path, check_files: bool = True) -
     cover = None
     if data.get("cover") is not None:
         cover = need_file("cover", data["cover"], COVER_EXTS)
+    cover_4x3 = None
+    if data.get("cover_4x3") is not None:
+        cover_4x3 = need_file("cover_4x3", data["cover_4x3"], COVER_EXTS)
 
     partition = data.get("partition")
     if partition is not None and (not isinstance(partition, str) or not partition.strip()):
@@ -205,12 +212,17 @@ def parse_meta(data: dict[str, Any], base_dir: Path, check_files: bool = True) -
             if not isinstance(t, str) or not t.strip():
                 problems.append(f"chapters[{i}]: empty title")
                 continue
+            if len(t.strip()) > CHAPTER_TITLE_MAX:
+                problems.append(f"chapters[{i}]: title {t.strip()!r} is {len(t.strip())} chars > {CHAPTER_TITLE_MAX}")
+                continue
             chapters.append(Chapter(start=start, title=t.strip()))
         if chapters:
             if chapters[0].start != 0:
                 problems.append("chapters: the first chapter must start at 0")
             if any(b.start <= a.start for a, b in zip(chapters, chapters[1:])):
                 problems.append("chapters: start times must be strictly increasing")
+            elif any(b.start - a.start < CHAPTER_MIN_GAP_S for a, b in zip(chapters, chapters[1:])):
+                problems.append(f"chapters: consecutive chapters must be at least {CHAPTER_MIN_GAP_S} s apart")
 
     subtitles = None
     raw_sub = data.get("subtitles")
@@ -243,7 +255,7 @@ def parse_meta(data: dict[str, Any], base_dir: Path, check_files: bool = True) -
         raise MetaError(problems)
     assert video is not None
     return UploadMeta(
-        video=video, title=title, creation_statement=statement.strip(), cover=cover,
+        video=video, title=title, creation_statement=statement.strip(), cover=cover, cover_4x3=cover_4x3,
         partition=partition.strip() if partition else None, tags=tags, description=desc,
         chapters=chapters, subtitles=subtitles, visibility=visibility, dynamic=dynamic,
     )

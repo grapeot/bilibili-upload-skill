@@ -38,9 +38,25 @@ def test_compare_detects_mismatch(tmp_path):
 def test_compare_chapters_and_subtitles(tmp_path):
     meta = _meta(tmp_path, chapters=[{"start": 0, "title": "开场"}], subtitles={"path": "s.srt"})
     got = {"title": "标题", "creation_statement": "内容无需标注", "visibility": "公开可见",
-           "chapters_section": "章节管理 00:00 开场", "subtitles_section": "字幕设置"}
+           "chapters_section": "章节管理 已配置章节 编辑章节", "subtitles_section": "字幕设置 上传字幕"}
     mismatches, _ = compare(got, meta)
     assert set(mismatches) == {"subtitles_section"}
+    got["subtitles_section"] = "字幕设置 已上传【中文】字幕"
+    assert compare(got, meta)[0] == {}
+
+
+def test_compare_tags_extra_is_mismatch_rejected_is_not(tmp_path):
+    meta = _meta(tmp_path, tags=["a", "b", "c"])
+    base = {"title": "标题", "creation_statement": "内容无需标注", "visibility": "公开可见"}
+    assert compare({**base, "tags": ["a", "c"]}, meta)[0] == {}  # b 被静默拒收：只告警
+    assert "tags" in compare({**base, "tags": ["a", "前端"]}, meta)[0]  # 多出自动带入的标签
+
+
+def test_chapters_text_format(tmp_path):
+    from bilibili_upload.fill import chapters_text
+
+    meta = _meta(tmp_path, chapters=[{"start": 0, "title": "开场"}, {"start": 229.4, "title": "第二"}])
+    assert chapters_text(meta) == "00:00 开场\n03:49 第二"
 
 
 def test_browser_matches():

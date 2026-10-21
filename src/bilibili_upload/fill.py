@@ -11,9 +11,12 @@ import time
 from typing import Any
 
 from .guard import focus_editable, safe_click, safe_fill, safe_insert_text, safe_press
-from .meta import UploadMeta, format_timestamp
+from .meta import UploadMeta
 from .plan import ALWAYS_HUMAN
-from .selectors import SELECTORS, UPLOAD_URL, css
+from .selectors import BENIGN_DIALOG_TEXTS, OWN_DIALOG_TEXTS, SELECTORS, UPLOAD_URL, css
+
+COVER_SLOT_4X3 = "首页推荐封面（4:3）"
+COVER_SLOT_16X9 = "个人空间封面（16:9）"
 
 
 class Form:
@@ -23,12 +26,14 @@ class Form:
         self.skipped: list[dict[str, str]] = []
         self.missing: dict[str, dict[str, str]] = {}
         self.human: list[str] = []
+        self.unknown_dialogs: list[str] = []
+        self.warnings: list[str] = []
 
     def mark_missing(self, name: str) -> None:
         self.missing[name] = {"css": SELECTORS[name].css, "note": SELECTORS[name].note}
 
-    def find(self, name: str, timeout: float = 5000, state: str = "visible"):
-        loc = self.page.locator(css(name))
+    def find(self, name: str, timeout: float = 5000, state: str = "visible", root=None):
+        loc = (root or self.page).locator(css(name))
         try:
             loc.first.wait_for(state=state, timeout=timeout)
             return loc
@@ -40,16 +45,79 @@ class Form:
         self.skipped.append({"step": step, "reason": reason})
 
     def run(self, step: str, fn) -> None:
+        dismiss_dialogs(self)
         try:
             ok = fn()
             if ok is False:
                 if not any(s["step"] == step for s in self.skipped):
                     self.skip(step, "required element not found (see missing_selectors)")
+                close_own_dialogs(self)
                 return
             self.filled.append(step)
         except Exception as e:  # noqa: BLE001 - 每一步独立失败，汇总报告
             msg = str(e).splitlines()[0][:200] if str(e) else ""
             self.skip(step, f"{type(e).__name__}: {msg}")
+            close_own_dialogs(self)
+
+
+def visible_dialogs(page) -> list[tuple[Any, str]]:
+    loc = page.locator(css("dialog"))
+    out = []
+    for i in range(loc.count()):
+        d = loc.nth(i)
+        try:
+            if d.is_visible():
+                out.append((d, re.sub(r"\s+", " ", d.inner_text(timeout=2000)).strip()))
+        except Exception:  # noqa: BLE001 - 弹窗在检查过程中消失
+            continue
+    return out
+
+
+def _close_dialog(dialog) -> bool:
+    x = dialog.locator(css("dialog_close"))
+    if not x.count():
+        return False
+    safe_click(x)
+    return True
+
+
+def dismiss_dialogs(form: Form) -> None:
+    """关掉已知无害的弹窗（用 x，不点「知道了」）；其他可见弹窗按文字报告，不动它。"""
+    for dialog, text in visible_dialogs(form.page):
+        if any(t in text for t in BENIGN_DIALOG_TEXTS):
+            try:
+                if _close_dialog(dialog):
+                    form.page.wait_for_timeout(500)
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        if any(t in text for t in OWN_DIALOG_TEXTS):
+            continue  # 本工具自己的弹窗由对应步骤处理
+        short = text[:80]
+        if short and short not in form.unknown_dialogs:
+            form.unknown_dialogs.append(short)
+
+
+def close_own_dialogs(form: Form) -> None:
+    """步骤失败后，用 x 关掉本工具打开的弹窗，免得挡住后续步骤。"""
+    for dialog, text in visible_dialogs(form.page):
+        if any(t in text for t in OWN_DIALOG_TEXTS):
+            try:
+                _close_dialog(dialog)
+                form.page.wait_for_timeout(500)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _dialog_with(page, marker: str, timeout_ms: float = 10000):
+    """等待并返回文字含 marker 的可见弹窗。"""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        for dialog, text in visible_dialogs(page):
+            if marker in text:
+                return dialog
+        page.wait_for_timeout(300)
+    return None
 
 
 def _clear_and_type_quill(page, editor_locator, text: str) -> None:
@@ -127,43 +195,64 @@ def step_title(form: Form, meta: UploadMeta):
         raise RuntimeError("title readback differs after fill")
 
 
+def _set_cover_slot(form: Form, dialog, slot_text: str, path) -> None:
+    slot = dialog.get_by_text(slot_text, exact=True)
+    if not slot.count():
+        raise RuntimeError(f"cover slot {slot_text!r} not found in the cover dialog")
+    safe_click(slot)
+    form.page.wait_for_timeout(500)
+    inp = form.find("cover_file_input", timeout=5000, state="attached", root=dialog)
+    if inp is None:
+        raise RuntimeError("image file input not found in the cover dialog")
+    inp.first.set_input_files(str(path))  # 封面是小文件，Playwright 自带方式即可
+    form.page.wait_for_timeout(2500)
+
+
 def step_cover(form: Form, meta: UploadMeta):
     cover = form.find("cover")
     if cover is None:
         return False
     safe_click(cover)
-    if form.find("cover_dialog", timeout=10000) is None:
-        return False
-    inp = form.find("cover_file_input", timeout=5000, state="attached")
-    if inp is None:
-        return False
-    inp.first.set_input_files(str(meta.cover))  # 封面是小文件，Playwright 自带方式即可
-    form.page.wait_for_timeout(3000)
-    dialog = form.page.locator(css("cover_dialog")).first
-    for label in ("完成", "确定"):
-        btn = dialog.get_by_text(label, exact=True)
-        if btn.count():
-            safe_click(btn.last)
-            break
-    else:
-        raise RuntimeError("cover dialog: no 完成/确定 button found")
+    dialog = _dialog_with(form.page, "封面制作")
+    if dialog is None:
+        raise RuntimeError("cover dialog (封面制作) did not open")
+    four_three = meta.cover_4x3 or meta.cover
+    if four_three:
+        _set_cover_slot(form, dialog, COVER_SLOT_4X3, four_three)
+        if meta.cover_4x3 is None:
+            form.human.append("4:3 首页推荐封面用的是 16:9 图片，B 站会裁掉两侧，请检查")
+    if meta.cover:
+        _set_cover_slot(form, dialog, COVER_SLOT_16X9, meta.cover)
+    confirm = dialog.locator(css("cover_confirm")).filter(has_text=_exact("完成"))
+    if not confirm.count():
+        form.mark_missing("cover_confirm")
+        raise RuntimeError("cover dialog: 完成 not found")
+    safe_click(confirm)  # 守卫对这一个按钮有限定范围的放行
     form.page.wait_for_timeout(1500)
-    form.human.append("核对封面是否为指定图片")
+    if _dialog_with(form.page, "封面制作", timeout_ms=1000) is not None:
+        raise RuntimeError("cover dialog still open after 完成")
+    form.human.append("核对封面（4:3 与 16:9 两个位置）")
 
 
 def step_statement(form: Form, meta: UploadMeta):
-    box = form.find("statement_input")
+    box = form.find("statement_input", state="attached")
     if box is None:
         return False
     if box.first.input_value() == meta.creation_statement:
         return None
-    safe_click(box)
+    trigger = form.find("statement_trigger")
+    if trigger is None:
+        return False
+    safe_click(trigger)
     if form.find("statement_option") is None:
         return False
     opts = form.page.locator(css("statement_option")).filter(has_text=_exact(meta.creation_statement))
     if not opts.count():
         raise RuntimeError(f"option {meta.creation_statement!r} not in the statement dropdown")
     safe_click(opts)
+    form.page.wait_for_timeout(500)
+    if box.first.input_value() != meta.creation_statement:
+        raise RuntimeError("creation statement did not change after choosing the option")
 
 
 def step_partition(form: Form, meta: UploadMeta):
@@ -180,6 +269,7 @@ def step_partition(form: Form, meta: UploadMeta):
     if not opt.count():
         raise RuntimeError(f"partition option {meta.partition!r} not found")
     safe_click(opt)
+    form.page.wait_for_timeout(500)
 
 
 def read_tags(page) -> list[str]:
@@ -189,17 +279,28 @@ def read_tags(page) -> list[str]:
 def step_tags(form: Form, meta: UploadMeta):
     if form.find("tag_input") is None:
         return False
-    existing = read_tags(form.page)
-    extra = [t for t in existing if t not in meta.tags]
-    todo = [t for t in meta.tags if t not in existing]
-    if len(existing) + len(todo) > 10:
-        raise RuntimeError(f"too many tags: {len(existing)} on page + {len(todo)} new > 10; remove extras first")
-    if extra:
-        form.human.append(f"页面上已有元数据之外的标签，请确认是否保留：{extra}")
-    for tag in todo:
+    # B 站会按内容自动带入标签：先删掉元数据之外的标签
+    for _ in range(20):
+        existing = read_tags(form.page)
+        extra = [i for i, t in enumerate(existing) if t not in meta.tags]
+        if not extra:
+            break
+        closes = form.page.locator(css("tag_close"))
+        if closes.count() != len(existing):
+            form.mark_missing("tag_close")
+            raise RuntimeError("cannot locate the delete button of each existing tag")
+        safe_click(closes.nth(extra[0]))
+        form.page.wait_for_timeout(300)
+    for tag in meta.tags:
+        if tag in read_tags(form.page):
+            continue
         handle = safe_fill(form.page.locator(css("tag_input")), tag)
         safe_press(form.page, handle, "Enter")
-        form.page.wait_for_timeout(400)
+        form.page.wait_for_timeout(500)
+    rejected = [t for t in meta.tags if t not in read_tags(form.page)]
+    if rejected:  # B 站会静默拒收部分标签，不报错
+        form.warnings.append(f"tags not accepted by Bilibili: {rejected}")
+        form.human.append(f"这些标签没有被 B 站接受（页面无提示）：{rejected}")
 
 
 def step_description(form: Form, meta: UploadMeta):
@@ -246,25 +347,86 @@ def step_subtitles(form: Form, meta: UploadMeta):
     btn = form.find("subtitle_button")
     if btn is None:
         return False
+    safe_click(btn)
+    dialog = form.find("subtitle_dialog", timeout=10000)
+    if dialog is None:
+        return False
+    dialog = dialog.first
+    lang = form.find("subtitle_lang", root=dialog)
+    if lang is None:
+        return False
+    safe_click(lang)
+    opt = dialog.locator(css("subtitle_lang_option")).filter(has_text=_exact(meta.subtitles.language))
+    if not opt.count():
+        raise RuntimeError(f"subtitle language {meta.subtitles.language!r} not offered")
+    safe_click(opt)
+    up = form.find("subtitle_file_button", root=dialog)
+    if up is None:
+        return False
     with form.page.expect_file_chooser(timeout=10000) as fc:
-        safe_click(btn)
+        safe_click(up)
     chooser = fc.value
     accept = (chooser.element.get_attribute("accept") or "").lower()
     name = chooser.element.get_attribute("name") or ""
-    if ".srt" not in accept or name == "buploader":
-        raise RuntimeError(f"file chooser does not look like the subtitle input (accept={accept!r}, name={name!r})")
-    chooser.set_files(str(meta.subtitles.path))
-    form.page.wait_for_timeout(3000)
-    form.human.append(f"确认字幕语言为「{meta.subtitles.language}」")
+    if name == "buploader" or ".mp4" in accept:
+        raise RuntimeError(f"file chooser looks like the video uploader (accept={accept!r}, name={name!r})")
+    chooser.set_files(str(meta.subtitles.path))  # 字幕是小文件
+    confirm = dialog.locator(css("subtitle_confirm")).filter(has_text="确认")
+    if not confirm.count():
+        form.mark_missing("subtitle_confirm")
+        raise RuntimeError("subtitle dialog: 确认 not found")
+    confirm.first.wait_for(state="visible", timeout=5000)
+    for _ in range(20):  # 选好文件后「确认」才可用
+        if confirm.first.is_enabled():
+            break
+        form.page.wait_for_timeout(500)
+    safe_click(confirm)
+    form.page.wait_for_timeout(1500)
     if not meta.subtitles.default_on:
-        form.human.append("确认字幕对观众默认关闭（页面若无此开关，投稿后在字幕管理里检查）")
+        form.human.append("表单里没有字幕「对观众默认开启/关闭」的设置；如需确认，投稿后去字幕管理或播放页检查")
+
+
+def chapters_text(meta: UploadMeta) -> str:
+    """章节文本编辑器接受的格式：每行「MM:SS 标题」。"""
+    return "\n".join(f"{c.timestamp} {c.title}" for c in meta.chapters)
 
 
 def step_chapters(form: Form, meta: UploadMeta):
-    form.skip("chapters", "章节编辑尚未自动化")
-    form.human.append("在「更多设置 > 章节管理」里录入章节：" +
-                      "；".join(f"{c.timestamp} {c.title}" for c in meta.chapters))
-    return False
+    if not expand_more_settings(form):
+        return False
+    if form.find("chapter_button") is None:
+        return False
+    btn = form.page.locator(css("chapter_button")).filter(has_text="编辑章节")
+    if not btn.count():
+        raise RuntimeError("编辑章节 button not found")
+    if btn.first.is_disabled():
+        raise RuntimeError("编辑章节 is disabled (usually until the upload has been processed)")
+    safe_click(btn)
+    if form.find("chapter_iframe", timeout=15000) is None:
+        return False
+    frame = form.page.locator(css("chapter_iframe")).first.element_handle().content_frame()
+    if frame is None:
+        raise RuntimeError("chapter iframe has no frame")
+    mode = frame.locator(css("chapter_text_mode"))
+    mode.first.wait_for(state="visible", timeout=15000)
+    safe_click(mode)
+    area = form.find("chapter_textarea", root=frame)
+    if area is None:
+        return False
+    safe_fill(frame.locator(css("chapter_textarea")), chapters_text(meta))
+    convert = form.find("chapter_convert", root=frame)
+    if convert is None:
+        return False
+    safe_click(convert)
+    form.page.wait_for_timeout(1000)
+    err = frame.get_by_text("请保证章节名称字数不超过16字")
+    if err.count() and err.first.is_visible():
+        raise RuntimeError("Bilibili rejected the chapters: 请保证章节名称字数不超过16字")
+    save = form.find("chapter_save", root=frame)
+    if save is None:
+        return False
+    safe_click(save)
+    form.page.wait_for_timeout(2000)
 
 
 # ---------------------------------------------------------------- 上传状态
@@ -314,6 +476,10 @@ _READ_JS = """(s) => {
   const q = (c) => document.querySelector(c);
   const txt = (c) => { const e = q(c); return e ? e.innerText.trim() : null; };
   const val = (c) => { const e = q(c); return e ? e.value : null; };
+  const txtWith = (c, marker) => {
+    const e = Array.from(document.querySelectorAll(c)).find(x => (x.innerText || '').includes(marker));
+    return e ? e.innerText.replace(/\\s+/g, ' ').trim() : null;
+  };
   return {
     title: val(s.title),
     creation_statement: val(s.statement_input),
@@ -323,7 +489,7 @@ _READ_JS = """(s) => {
     visibility: txt(s.visibility_checked),
     dynamic: txt(s.dynamic_editor),
     subtitles_section: txt(s.subtitle_section),
-    chapters_section: txt(s.chapter_section),
+    chapters_section: txtWith(s.chapter_section, '章节管理'),
   };
 }"""
 
@@ -336,7 +502,11 @@ _READ_SELECTORS = {
 
 
 def compare(got: dict[str, Any], meta: UploadMeta) -> tuple[dict[str, Any], list[str]]:
-    """纯函数：把读回值与元数据比对，返回 (mismatches, 读回为空的选择器名)。"""
+    """纯函数：把读回值与元数据比对，返回 (mismatches, 读回为空的选择器名)。
+
+    标签：页面上多出元数据之外的标签算不符；元数据里的标签被 B 站静默拒收不算不符
+    （由 step_tags 作为 warning 报告）。
+    """
     mismatches: dict[str, Any] = {}
     missing: list[str] = []
     wanted = {"title", "creation_statement", "visibility"}
@@ -351,29 +521,30 @@ def compare(got: dict[str, Any], meta: UploadMeta) -> tuple[dict[str, Any], list
         elif not ok:
             mismatches[key] = {"expected": expected, "actual": got.get(key)}
 
-    for key in wanted:
+    for key in sorted(wanted):
+        v = got.get(key)
         if key == "title":
-            cmp(key, got.get(key) == meta.title, meta.title)
+            cmp(key, v == meta.title, meta.title)
         elif key == "creation_statement":
-            cmp(key, got.get(key) == meta.creation_statement, meta.creation_statement)
+            cmp(key, v == meta.creation_statement, meta.creation_statement)
         elif key == "partition":
-            cmp(key, (got.get(key) or "").strip() == meta.partition, meta.partition)
+            cmp(key, (v or "").strip() == meta.partition, meta.partition)
         elif key == "tags":
-            cmp(key, got.get(key) == meta.tags, meta.tags)
+            page_tags = v or []
+            ok = all(t in meta.tags for t in page_tags) and [t for t in meta.tags if t in page_tags] == page_tags
+            cmp(key, ok, meta.tags)
         elif key == "description":
-            cmp(key, _norm_text(got.get(key)) == _norm_text(meta.description), "(see metadata)")
+            cmp(key, _norm_text(v) == _norm_text(meta.description), "(see metadata)")
         elif key == "visibility":
             vis = "公开可见" if meta.visibility == "public" else "仅自己可见"
-            cmp(key, got.get(key) == vis, vis)
+            cmp(key, v == vis, vis)
         elif key == "dynamic":
-            cmp(key, _norm_text(got.get(key)) == _norm_text(meta.dynamic), meta.dynamic)
+            cmp(key, _norm_text(v) == _norm_text(meta.dynamic), meta.dynamic)
         elif key == "subtitles_section":
-            name = meta.subtitles.path.name
-            cmp(key, name in (got.get(key) or ""), f"contains {name}")
+            lang = meta.subtitles.language
+            cmp(key, "已上传" in (v or "") and lang in (v or ""), f"已上传【{lang}】字幕")
         elif key == "chapters_section":
-            sec = got.get(key) or ""
-            cmp(key, all(c.title in sec for c in meta.chapters),
-                [f"{format_timestamp(c.start)} {c.title}" for c in meta.chapters])
+            cmp(key, "已配置章节" in (v or ""), "已配置章节")
     return mismatches, sorted(set(missing))
 
 
@@ -382,7 +553,8 @@ def readback(page, meta: UploadMeta) -> dict[str, Any]:
     mismatches, missing = compare(got, meta)
     if got.get("description") and len(got["description"]) > 120:
         got["description"] = got["description"][:120] + "…"
-    return {"values": got, "mismatches": mismatches, "missing": missing}
+    rejected = [t for t in meta.tags if got.get("tags") is not None and t not in got["tags"]]
+    return {"values": got, "mismatches": mismatches, "missing": missing, "tags_not_accepted": rejected}
 
 
 # ---------------------------------------------------------------- 入口
@@ -492,7 +664,7 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
         error = None
         try:
             form.run("title", lambda: step_title(form, meta))
-            if meta.cover:
+            if meta.cover or meta.cover_4x3:
                 form.run("cover", lambda: step_cover(form, meta))
             form.run("creation_statement", lambda: step_statement(form, meta))
             if meta.partition:
@@ -512,6 +684,7 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
             check = readback(page, meta)
             for name in check["missing"]:
                 form.mark_missing(name)
+            dismiss_dialogs(form)
             submit = page.locator(css("submit"))
             if submit.count():
                 submit.first.scroll_into_view_if_needed()  # 只滚动，不点击
@@ -530,6 +703,9 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
             "filled": form.filled,
             "skipped": form.skipped,
             "missing_selectors": form.missing,
+            "unknown_dialogs": form.unknown_dialogs,
+            "warnings": form.warnings,
+            "tags_not_accepted": check.get("tags_not_accepted", []),
             "upload": upload,
             "readback": check["values"],
             "mismatches": check["mismatches"],

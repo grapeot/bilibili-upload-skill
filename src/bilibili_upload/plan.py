@@ -25,8 +25,10 @@ def build_plan(meta: UploadMeta, reuse_tab: bool = False) -> dict[str, Any]:
         add("open_tab", "新开标签页进入投稿页")
         add("select_video", {"path": str(meta.video), "note": "选择文件后立即开始上传"})
     add("title", {"value": meta.title, "note": "先清空自动带入的文件名"})
-    if meta.cover:
-        add("cover", str(meta.cover))
+    if meta.cover or meta.cover_4x3:
+        add("cover", {"16:9": str(meta.cover) if meta.cover else None,
+                      "4:3": str(meta.cover_4x3 or meta.cover),
+                      "note": "4:3 未单独指定时用 16:9 图片，B 站会裁掉两侧" if not meta.cover_4x3 else None})
     add("creation_statement", meta.creation_statement)
     if meta.partition:
         add("partition", meta.partition)
@@ -42,11 +44,12 @@ def build_plan(meta: UploadMeta, reuse_tab: bool = False) -> dict[str, Any]:
         add("chapters", [{"time": c.timestamp, "title": c.title} for c in meta.chapters])
     if meta.dynamic:
         add("dynamic", {"chars": len(meta.dynamic)})
+    add("dismiss_dialogs", "每一步前用 x 关闭已知无害弹窗（如上传完成通知），其他弹窗按文字报告")
     add("wait_upload", "等待视频上传与处理")
     add("readback", "逐项读回并与元数据比对")
     add("stop_before_submit", "把「立即投稿」滚动到视野内，断开连接，不点击")
 
     human = list(ALWAYS_HUMAN)
     if meta.subtitles and not meta.subtitles.default_on:
-        human.insert(0, "确认字幕对观众默认关闭（若页面没有该开关，投稿后在字幕管理里检查）")
+        human.insert(0, "表单里没有字幕默认开关；如需确认字幕对观众默认关闭，投稿后在字幕管理或播放页检查")
     return {"steps": steps, "human_steps": human, "meta": meta.to_json()}
