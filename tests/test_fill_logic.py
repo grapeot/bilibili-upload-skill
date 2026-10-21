@@ -62,3 +62,5 @@ def test_tab_matches_video():
     assert tab_matches_video("", "我的标题", v, "我的标题")  # 已经填过标题
     assert not tab_matches_video("other.mp4", "别的标题", v, "我的标题")
     assert not tab_matches_video("", "", v, "我的标题")
+    assert not tab_matches_video("intro_my_video_v4.mp4 上传中", None, v)  # 不做子串匹配
+    assert not tab_matches_video("data.mp4", None, Path("/x/a.mp4"))

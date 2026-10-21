@@ -53,8 +53,9 @@ def test_focus_verdict():
     good = {"focused": True, "active": {"editable": True, "cls": "input-val"}}
     assert focus_verdict(good) is None
     assert focus_verdict({**good, "focused": False}) is not None
-    assert focus_verdict({**good, "formHasSubmit": True}) is not None
-    assert focus_verdict({**good, "inForm": True}) is not None
+    assert focus_verdict({**good, "formHasSubmit": True}, enter=True) is not None
+    assert focus_verdict({**good, "inForm": True}, enter=True) is not None
+    assert focus_verdict({**good, "inForm": True}) is None  # 填值、插入文字不会提交
     assert focus_verdict({"focused": True, "active": {"editable": False, "text": "确定"}}) is not None
 
 

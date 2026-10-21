@@ -5,13 +5,14 @@
 - 元素自身、它最近的可交互祖先（button / a / [role=button] / label）的文字、aria、type；
 - 元素到文档根的所有祖先（穿过 shadow root）的类名；
 - 元素内部是否包含提交类元素；
-- 元素中心点实际命中的元素（elementFromPoint）及其可交互祖先。
+- 元素中心点实际命中的元素（elementFromPoint）及其可交互祖先；
+- 元素和命中元素的所有祖先里，是否有文字很短或可点击、且文字含禁词的元素（div/span 拼成的按钮；
+  包含输入框或可编辑区域的祖先跳过，真正的按钮不会包含输入框）；
+- 若在 <label> 里，label 关联的控件（元素和命中元素都查）。
 任何一项像提交或存草稿，就抛出 ForbiddenClick，不点击。宁可误拒，不可误点。
 
-- 元素和命中元素的所有祖先里，是否有文字很短或可点击、且文字含禁词的元素（div/span 拼成的按钮）；
-- 若在 <label> 里，label 关联的控件。
-
-按键前，守卫要求焦点在预期的可编辑元素上，且该元素不在任何 <form> 里。
+按键前，守卫要求焦点在预期的可编辑元素上；按回车时还要求它不在任何 <form> 里
+（回车可能触发表单的隐式提交；填值和插入文字不会提交，不受这条限制）。
 """
 
 from __future__ import annotations
@@ -65,13 +66,12 @@ const containsSubmit = (e) => {
 
 _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
   // 祖先里任何「短文字含禁词」或「可点击且文字含禁词」的元素都视为提交按钮（div/span 拼成的按钮）
+  const EDITABLE_CSS = 'input, textarea, [contenteditable=""], [contenteditable="true"]';
   const ancestorButton = (e) => {
-    const own = isEditable(el) ? (el.innerText || '') : '';
     for (let p = e; p; p = parentOf(p)) {
       if (p.nodeType !== 1) continue;
-      let t = (p.innerText || '');
-      if (own) t = t.split(own).join('');
-      t = t.trim();
+      if (isEditable(p) || p.isContentEditable || (p.querySelector && p.querySelector(EDITABLE_CSS))) continue;
+      const t = (p.innerText || '').trim();
       if (!t || !hasWord(t)) continue;
       if (t.length <= 12) return `ancestor with short text ${JSON.stringify(t)}`;
       const st = getComputedStyle(p);
@@ -84,10 +84,14 @@ _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
                containsSubmit: containsSubmit(el), ancestorButton: ancestorButton(el)};
   const i = interactive(el);
   if (i && i !== el) out.inter = describe(i);
-  const lab = el.closest ? el.closest('label') : null;
-  if (lab && lab.control && lab.control !== el) {
-    out.control = describe(lab.control);
-    if (containsSubmit(lab.control)) out.containsSubmit = true;
+  const labelControl = (e) => {
+    const lab = e.closest ? e.closest('label') : null;
+    return (lab && lab.control && lab.control !== e) ? lab.control : null;
+  };
+  const ctl = labelControl(el);
+  if (ctl) {
+    out.control = describe(ctl);
+    if (containsSubmit(ctl)) out.containsSubmit = true;
   }
   const r = el.getBoundingClientRect();
   const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
@@ -95,7 +99,12 @@ _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
     out.hit = describe(hit);
     const hi = interactive(hit);
     if (hi && hi !== hit && hi !== i) out.hitInter = describe(hi);
-    out.ancestorButton = out.ancestorButton || ancestorButton(hit);
+    if (!el.contains(hit)) out.ancestorButton = out.ancestorButton || ancestorButton(hit);
+    const hctl = labelControl(hit);
+    if (hctl && hctl !== ctl) {
+      out.hitControl = describe(hctl);
+      if (containsSubmit(hctl)) out.containsSubmit = true;
+    }
   }
   return out;
 }"""
@@ -151,21 +160,21 @@ def click_verdict(report: dict[str, Any]) -> str | None:
         return "element contains a submit-like control"
     if report.get("ancestorButton"):
         return report["ancestorButton"]
-    for key in ("self", "inter", "hit", "hitInter", "control"):
+    for key in ("self", "inter", "hit", "hitInter", "control", "hitControl"):
         reason = forbidden_reason(report.get(key))
         if reason:
             return f"{key}: {reason}"
     return None
 
 
-def focus_verdict(report: dict[str, Any]) -> str | None:
-    """纯函数：按键前的焦点检查。"""
+def focus_verdict(report: dict[str, Any], enter: bool = False) -> str | None:
+    """纯函数：按键前的焦点检查。enter=True 时额外要求不在 <form> 里。"""
     if not report.get("focused"):
         return "focus is not on the intended element"
     active = report.get("active") or {}
     if not active.get("editable"):
         return "focused element is not editable"
-    if report.get("inForm") or report.get("formHasSubmit"):
+    if enter and (report.get("inForm") or report.get("formHasSubmit")):
         return "focused element is inside a <form> (Enter could submit it)"
     return forbidden_reason(active)
 
@@ -196,8 +205,8 @@ def safe_click(locator, timeout: float = 5000) -> None:
     handle.click(timeout=timeout)
 
 
-def _check_focus(handle) -> None:
-    reason = focus_verdict(handle.evaluate(INSPECT_FOCUS_JS))
+def _check_focus(handle, enter: bool = False) -> None:
+    reason = focus_verdict(handle.evaluate(INSPECT_FOCUS_JS), enter=enter)
     if reason:
         raise ForbiddenClick(f"refusing to send keys: {reason}")
 
@@ -213,8 +222,8 @@ def focus_editable(locator, timeout: float = 5000):
 
 
 def safe_press(page, handle, key: str) -> None:
-    """按键前确认焦点仍在预期的可编辑元素上。"""
-    _check_focus(handle)
+    """按键前确认焦点仍在预期的可编辑元素上；回车还要求不在表单里。"""
+    _check_focus(handle, enter="enter" in key.lower())
     page.keyboard.press(key)
 
 

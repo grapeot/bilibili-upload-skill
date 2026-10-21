@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from typing import Any
@@ -110,10 +109,12 @@ def select_file_via_chooser(page, click_locator, path, accept_hint: str, timeout
             raise RuntimeError(f"file chooser input does not look right: {info}")
         cdp.send("DOM.setFileInputFiles", {"files": [abs_path], "backendNodeId": node})
     finally:
-        try:
-            cdp.send("Page.setInterceptFileChooserDialog", {"enabled": False})
-        finally:
-            cdp.detach()
+        # 清理失败不能掩盖结果：文件可能已经选上，调用方据此决定是否关标签页
+        for fn in (lambda: cdp.send("Page.setInterceptFileChooserDialog", {"enabled": False}), cdp.detach):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------- 各字段步骤
@@ -121,8 +122,7 @@ def select_file_via_chooser(page, click_locator, path, accept_hint: str, timeout
 def step_title(form: Form, meta: UploadMeta):
     if form.find("title", timeout=60000) is None:
         return False
-    handle = safe_fill(form.page.locator(css("title")), "")  # 清掉自动带入的文件名
-    handle = safe_fill(form.page.locator(css("title")), meta.title)
+    handle = safe_fill(form.page.locator(css("title")), meta.title)  # fill 会替换自动带入的文件名
     if handle.input_value() != meta.title:
         raise RuntimeError("title readback differs after fill")
 
@@ -396,10 +396,11 @@ def find_upload_tabs(ctx) -> list:
 def tab_matches_video(text: str, title_value: str | None, video, title: str | None = None) -> bool:
     """纯函数：这个标签页是否在处理这个视频。
 
-    依据：上传条目文字里有文件名或去掉扩展名的文件名；或者标题框里是 B 站自动带入的
-    文件名（不含扩展名）；或者标题框已经是元数据里的标题（上次填写过）。
+    依据（整词相等，不做子串匹配）：上传条目文字里有完整文件名或去掉扩展名的文件名；
+    或者标题框里是 B 站自动带入的文件名（不含扩展名）；或者标题框已经是元数据里的标题。
     """
-    if video.name in text or (len(video.stem) >= 4 and video.stem in text):
+    tokens = {t for t in re.split(r"[\s|]+", text or "") if t}
+    if video.name in tokens or video.stem in tokens:
         return True
     tv = (title_value or "").strip()
     return bool(tv) and (tv in (video.stem, video.name) or (title is not None and tv == title))
@@ -407,15 +408,24 @@ def tab_matches_video(text: str, title_value: str | None, video, title: str | No
 
 def _title_value(pg) -> str | None:
     loc = pg.locator(css("title"))
-    return loc.first.input_value() if loc.count() else None
+    try:
+        return loc.first.input_value(timeout=2000) if loc.count() else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def matching_upload_tabs(ctx, video, title: str | None = None) -> list:
+    return [pg for pg in find_upload_tabs(ctx)
+            if tab_matches_video(upload_state(pg, full_text=True)["text"], _title_value(pg), video, title)]
 
 
 def find_upload_tab(ctx, video=None, title: str | None = None):
-    for pg in find_upload_tabs(ctx):
-        if video is None or tab_matches_video(upload_state(pg, full_text=True)["text"], _title_value(pg),
-                                              video, title):
-            return pg
-    return None
+    """恰好一个标签页匹配时返回它；零个或多个都返回 None（多个时不替人选）。"""
+    if video is None:
+        tabs = find_upload_tabs(ctx)
+        return tabs[0] if len(tabs) == 1 else None
+    tabs = matching_upload_tabs(ctx, video, title)
+    return tabs[0] if len(tabs) == 1 else None
 
 
 def describe_upload_tabs(ctx) -> list[dict[str, Any]]:
@@ -442,7 +452,9 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
             page = find_upload_tab(ctx, meta.video, meta.title)
             if page is None:
                 tabs = describe_upload_tabs(ctx)
-                return {"ok": False, "error": f"no upload tab matches {meta.video.name!r}",
+                n = len(matching_upload_tabs(ctx, meta.video, meta.title))
+                return {"ok": False, "error": (f"{n} upload tabs match {meta.video.name!r}; refusing to choose" if n > 1
+                                               else f"no upload tab matches {meta.video.name!r}"),
                         "upload_tabs": tabs, "next": ASK_HUMAN if tabs else
                         "no upload tab is open; only then is a run without --reuse-tab appropriate"}
             form = Form(page)
@@ -456,17 +468,18 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
             try:
                 page.goto(UPLOAD_URL, wait_until="domcontentloaded")
                 login = check_login(page)
-                if login.get("logged_in") is not True:
-                    page.close()
-                    return {"ok": False, "error": "not logged in; ask the human to scan the QR code", **login}
+                if login.get("logged_in") is not True:  # 保留这个标签页，人可以在里面扫码登录
+                    return {"ok": False, "error": "not logged in; ask the human to log in (QR scan) in the opened tab",
+                            **login}
                 if form.find("upload_area", timeout=20000) is None:
                     page.close()
                     return {"ok": False, "error": "upload area not found", "missing_selectors": form.missing}
                 select_file_via_chooser(page, page.locator(css("upload_area")), meta.video, ".mp4")  # 上传从这里开始
             except Exception as e:  # noqa: BLE001 - 文件没选上：关掉自己开的标签页，不留空页
-                if not page.is_closed():
+                if not page.is_closed() and not page.locator(css("title")).count():
                     page.close()
-                return {"ok": False, "video_selected": False, "error": f"{type(e).__name__}: {e}"}
+                return {"ok": False, "video_selected": None if not page.is_closed() else False,
+                        "error": f"{type(e).__name__}: {e}"}
             form.filled.append("select_video")
         page.bring_to_front()
 

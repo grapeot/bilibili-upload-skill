@@ -25,6 +25,8 @@ HTML = """
   <form onsubmit="window.submitted=1;return false"><input id="single" class="inp"></form>
   <div class="setting"><div class="ql-editor" contenteditable="true" id="ed">投稿后发布</div></div>
   <div class="upload-area" id="ua" onclick="document.querySelector('#fileinput').click()">上传视频</div>
+  <div class="tag-wrap"><span>新人投稿</span><input id="tag" class="input-val"></div>
+  <div class="desc"><div class="ql-editor" contenteditable="true" id="ed2"><p>欢迎投稿</p></div></div>
   <input type="file" id="fileinput" accept=".mp4,.flv" style="display:none">
   <div id="cover" style="position:relative;width:200px;height:40px">covered
     <div class="submit-add" style="position:absolute;inset:0;background:#fff">立即投稿</div></div>
@@ -54,9 +56,11 @@ def test_rejects_hidden_submit_paths(page, sel):
         safe_click(page.locator(sel))
 
 
-def test_press_refused_inside_form_with_submit(page):
+def test_enter_refused_inside_form_with_submit(page):
+    h = focus_editable(page.locator("#forminput"))  # 聚焦、填值可以
+    safe_press(page, h, "a")
     with pytest.raises(ForbiddenClick):
-        focus_editable(page.locator("#forminput"))
+        safe_press(page, h, "Enter")
 
 
 def test_press_allowed_in_plain_input(page):
@@ -73,10 +77,21 @@ def test_press_refused_when_focus_moved(page):
         safe_press(page, h, "Enter")
 
 
-def test_press_refused_in_single_input_form(page):
+def test_enter_refused_in_single_input_form(page):
+    h = focus_editable(page.locator("#single"))
     with pytest.raises(ForbiddenClick):
-        focus_editable(page.locator("#single"))
+        safe_press(page, h, "Enter")
     assert page.evaluate("window.submitted") is None
+
+
+def test_tag_input_next_to_forbidden_tag_text_is_allowed(page):
+    h = focus_editable(page.locator("#tag"))
+    safe_press(page, h, "Enter")
+
+
+def test_multiline_editor_with_forbidden_line_is_allowed(page):
+    h = focus_editable(page.locator("#ed2"))
+    safe_press(page, h, "End")
 
 
 def test_editor_with_forbidden_user_text_is_editable(page):
