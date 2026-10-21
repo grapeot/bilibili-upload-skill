@@ -103,7 +103,8 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 
 ## 已知限制与坑
 
-- **大文件不能用 Playwright 的 `set_input_files`。** 通过 `connect_over_cdp` 接入的浏览器在 Playwright 看来是远程浏览器，`set_input_files` 会把文件内容经 CDP 传过去，上限 50 MB，真实视频几乎都超过，报错为 `Cannot transfer files larger than 50Mb to a browser not co-located with the server`。本工具改用 CDP 的 `DOM.setFileInputFiles`，只把本机绝对路径交给 Chrome，由 Chrome 自己从磁盘读取。前提是 Chrome 和本工具在同一台机器上。
+- **大文件不能用 Playwright 的 `set_input_files`。** 通过 `connect_over_cdp` 接入的浏览器在 Playwright 看来是远程浏览器，`set_input_files` 会把文件内容经 CDP 传过去，上限 50 MB，真实视频几乎都超过，报错为 `Cannot transfer files larger than 50Mb to a browser not co-located with the server`。直接对输入框调用 CDP `DOM.setFileInputFiles` 也不行：调用成功，但 B 站的上传组件不响应。本工具的做法是开启 `Page.setInterceptFileChooserDialog`，经守卫点击 `.upload-area`（内部的 `.upload-btn` 不接收点击），收到 `Page.fileChooserOpened` 后对其 `backendNodeId` 调用 `DOM.setFileInputFiles`，只传本机绝对路径，由 Chrome 自己从磁盘读取。前提是 Chrome 和本工具在同一台机器上。
+- 选好视频后，标题框会自动带入去掉扩展名的文件名。`--reuse-tab` 据此（或上传条目里的文件名、或已填好的标题）找到对应的标签页。
 - 选文件之前出错时，`fill --execute` 会关掉自己新开的标签页，不留空的投稿页。
 - 章节编辑还没有自动化，执行结果会把章节列在 `human_steps` 里。
 - 字幕默认开关、字幕语言、封面最终效果需要人在页面上确认。

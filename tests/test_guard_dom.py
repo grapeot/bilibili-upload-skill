@@ -24,7 +24,8 @@ HTML = """
   <label for="sb" id="lab">选项</label><button id="sb">立即投稿</button>
   <form onsubmit="window.submitted=1;return false"><input id="single" class="inp"></form>
   <div class="setting"><div class="ql-editor" contenteditable="true" id="ed">投稿后发布</div></div>
-  <input type="file" id="fileinput">
+  <div class="upload-area" id="ua" onclick="document.querySelector('#fileinput').click()">上传视频</div>
+  <input type="file" id="fileinput" accept=".mp4,.flv" style="display:none">
   <div id="cover" style="position:relative;width:200px;height:40px">covered
     <div class="submit-add" style="position:absolute;inset:0;background:#fff">立即投稿</div></div>
 </div></body></html>
@@ -83,14 +84,19 @@ def test_editor_with_forbidden_user_text_is_editable(page):
     safe_press(page, h, "End")
 
 
-def test_set_local_files_via_cdp(page, tmp_path):
-    from bilibili_upload.fill import set_local_files
+def test_select_file_via_chooser(page, tmp_path):
+    from bilibili_upload.fill import select_file_via_chooser
 
     f = tmp_path / "clip.mp4"
     f.write_bytes(b"\x00" * 8)
-    set_local_files(page, "#fileinput", f)
+    select_file_via_chooser(page, page.locator("#ua"), f, ".mp4")
     assert page.evaluate("document.querySelector('#fileinput').files[0].name") == "clip.mp4"
+
+
+def test_select_file_via_chooser_checks_accept(page, tmp_path):
+    from bilibili_upload.fill import select_file_via_chooser
+
+    f = tmp_path / "subs.srt"
+    f.write_text("x")
     with pytest.raises(RuntimeError):
-        set_local_files(page, "#plain", f)
-    with pytest.raises(RuntimeError):
-        set_local_files(page, "#nope", f)
+        select_file_via_chooser(page, page.locator("#ua"), f, ".srt")

@@ -20,7 +20,8 @@ class Selector:
 
 SELECTORS: dict[str, Selector] = {
     # 落地页
-    "file_input": Selector("input[type=file][name=buploader][accept*='.mp4']", "视频文件输入框（落地页）"),
+    "file_input": Selector("input[type=file][name=buploader][accept*='.mp4']", "视频文件输入框（落地页，只用于核对）"),
+    "upload_area": Selector(".upload-area", "落地页上传区域（点击它弹出文件选择框；内部的 .upload-btn 不接收点击）"),
     # 上传状态
     "upload_item": Selector(".file-list-v2-item, .file-item", "已选视频的上传条目"),
     # 基本信息

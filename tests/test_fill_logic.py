@@ -56,6 +56,9 @@ def test_browser_matches():
 
 def test_tab_matches_video():
     v = Path("/x/my_video_v4.mp4")
-    assert tab_matches_video("my_video_v4.mp4 上传完成", v)
-    assert tab_matches_video("my_video_v4 上传中 3%", v)
-    assert not tab_matches_video("other.mp4", v)
+    assert tab_matches_video("my_video_v4.mp4 上传完成", None, v)
+    assert tab_matches_video("my_video_v4 上传中 3%", None, v)
+    assert tab_matches_video("", "my_video_v4", v)  # 标题框里是自动带入的文件名
+    assert tab_matches_video("", "我的标题", v, "我的标题")  # 已经填过标题
+    assert not tab_matches_video("other.mp4", "别的标题", v, "我的标题")
+    assert not tab_matches_video("", "", v, "我的标题")

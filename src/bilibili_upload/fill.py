@@ -72,35 +72,48 @@ def _exact(text: str) -> re.Pattern:
     return re.compile(rf"^\s*{re.escape(text)}\s*$")
 
 
-def set_local_files(page, selector: str, path) -> None:
-    """让 Chrome 直接从本机磁盘读取文件，交给页面上的文件输入框。
+def select_file_via_chooser(page, click_locator, path, accept_hint: str, timeout_ms: float = 15000) -> None:
+    """点击上传区域，拦截它弹出的文件选择框，让 Chrome 直接从本机磁盘读取文件。
 
     connect_over_cdp 接入的浏览器在 Playwright 看来是「远程」的，set_input_files 会把文件
-    内容经 CDP 传过去，并且限制在 50 MB 以内，真实视频几乎都超过。浏览器与本工具在同一台
-    机器上，所以改用 CDP 的 DOM.setFileInputFiles 只传绝对路径。
+    内容经 CDP 传过去，并且限制在 50 MB 以内，真实视频几乎都超过。直接对输入框调用
+    DOM.setFileInputFiles 时 B 站的上传组件也不会响应。可行的做法是：开启
+    Page.setInterceptFileChooserDialog，经守卫点击上传区域，收到 Page.fileChooserOpened
+    后对它给出的 backendNodeId 调用 DOM.setFileInputFiles，只传绝对路径。
+    前提是 Chrome 和本工具在同一台机器上。
     """
     from pathlib import Path
 
     abs_path = str(Path(path).expanduser().resolve())
     cdp = page.context.new_cdp_session(page)
+    events: list[dict[str, Any]] = []
+    cdp.on("Page.fileChooserOpened", lambda e: events.append(e))
     try:
-        res = cdp.send("Runtime.evaluate", {
-            "expression": f"document.querySelector({json.dumps(selector)})",
-            "returnByValue": False,
-        })
-        result = res.get("result", {})
-        oid = result.get("objectId")
-        if not oid or result.get("subtype") == "null":
-            raise RuntimeError(f"file input not found for selector {selector!r}")
-        desc = cdp.send("Runtime.callFunctionOn", {
-            "objectId": oid, "returnByValue": True,
-            "functionDeclaration": "function () { return this.tagName + ':' + (this.type || ''); }",
-        })
-        if desc.get("result", {}).get("value") != "INPUT:file":
-            raise RuntimeError(f"selector {selector!r} is not an <input type=file>")
-        cdp.send("DOM.setFileInputFiles", {"files": [abs_path], "objectId": oid})
+        cdp.send("Page.enable")
+        cdp.send("Page.setInterceptFileChooserDialog", {"enabled": True})
+        safe_click(click_locator)
+        deadline = time.monotonic() + timeout_ms / 1000
+        while not events and time.monotonic() < deadline:
+            page.wait_for_timeout(100)
+        if not events:
+            raise RuntimeError("clicking the upload area did not open a file chooser")
+        node = events[0].get("backendNodeId")
+        if node is None:
+            raise RuntimeError("file chooser event carried no backendNodeId")
+        obj = cdp.send("DOM.resolveNode", {"backendNodeId": node})["object"]["objectId"]
+        info = cdp.send("Runtime.callFunctionOn", {
+            "objectId": obj, "returnByValue": True,
+            "functionDeclaration": "function () { return {tag: this.tagName, type: this.type || '', "
+                                   "accept: (this.accept || '').toLowerCase()}; }",
+        })["result"]["value"]
+        if info.get("tag") != "INPUT" or info.get("type") != "file" or accept_hint not in info.get("accept", ""):
+            raise RuntimeError(f"file chooser input does not look right: {info}")
+        cdp.send("DOM.setFileInputFiles", {"files": [abs_path], "backendNodeId": node})
     finally:
-        cdp.detach()
+        try:
+            cdp.send("Page.setInterceptFileChooserDialog", {"enabled": False})
+        finally:
+            cdp.detach()
 
 
 # ---------------------------------------------------------------- 各字段步骤
@@ -124,7 +137,7 @@ def step_cover(form: Form, meta: UploadMeta):
     inp = form.find("cover_file_input", timeout=5000, state="attached")
     if inp is None:
         return False
-    set_local_files(form.page, css("cover_file_input"), meta.cover)
+    inp.first.set_input_files(str(meta.cover))  # 封面是小文件，Playwright 自带方式即可
     form.page.wait_for_timeout(3000)
     dialog = form.page.locator(css("cover_dialog")).first
     for label in ("完成", "确定"):
@@ -380,20 +393,34 @@ def find_upload_tabs(ctx) -> list:
             if pg.url.startswith(UPLOAD_URL) and pg.locator(css("title")).count()]
 
 
-def tab_matches_video(text: str, video) -> bool:
-    """纯函数：上传条目文字里是否出现视频文件名或去掉扩展名的文件名。"""
-    return video.name in text or (len(video.stem) >= 4 and video.stem in text)
+def tab_matches_video(text: str, title_value: str | None, video, title: str | None = None) -> bool:
+    """纯函数：这个标签页是否在处理这个视频。
+
+    依据：上传条目文字里有文件名或去掉扩展名的文件名；或者标题框里是 B 站自动带入的
+    文件名（不含扩展名）；或者标题框已经是元数据里的标题（上次填写过）。
+    """
+    if video.name in text or (len(video.stem) >= 4 and video.stem in text):
+        return True
+    tv = (title_value or "").strip()
+    return bool(tv) and (tv in (video.stem, video.name) or (title is not None and tv == title))
 
 
-def find_upload_tab(ctx, video=None):
+def _title_value(pg) -> str | None:
+    loc = pg.locator(css("title"))
+    return loc.first.input_value() if loc.count() else None
+
+
+def find_upload_tab(ctx, video=None, title: str | None = None):
     for pg in find_upload_tabs(ctx):
-        if video is None or tab_matches_video(upload_state(pg, full_text=True)["text"], video):
+        if video is None or tab_matches_video(upload_state(pg, full_text=True)["text"], _title_value(pg),
+                                              video, title):
             return pg
     return None
 
 
 def describe_upload_tabs(ctx) -> list[dict[str, Any]]:
-    return [{"upload_item_text": upload_state(pg)["text"][:120]} for pg in find_upload_tabs(ctx)]
+    return [{"upload_item_text": upload_state(pg)["text"][:120], "title_box": (_title_value(pg) or "")[:80]}
+            for pg in find_upload_tabs(ctx)]
 
 
 ASK_HUMAN = ("ask the human which tab holds this video; do not start another upload "
@@ -412,7 +439,7 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
     with sync_playwright() as p:
         browser, ctx = connect(p, session)
         if reuse_tab:
-            page = find_upload_tab(ctx, meta.video)
+            page = find_upload_tab(ctx, meta.video, meta.title)
             if page is None:
                 tabs = describe_upload_tabs(ctx)
                 return {"ok": False, "error": f"no upload tab matches {meta.video.name!r}",
@@ -432,10 +459,10 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
                 if login.get("logged_in") is not True:
                     page.close()
                     return {"ok": False, "error": "not logged in; ask the human to scan the QR code", **login}
-                if form.find("file_input", timeout=20000, state="attached") is None:
+                if form.find("upload_area", timeout=20000) is None:
                     page.close()
-                    return {"ok": False, "error": "video file input not found", "missing_selectors": form.missing}
-                set_local_files(page, css("file_input"), meta.video)  # 上传从这里开始
+                    return {"ok": False, "error": "upload area not found", "missing_selectors": form.missing}
+                select_file_via_chooser(page, page.locator(css("upload_area")), meta.video, ".mp4")  # 上传从这里开始
             except Exception as e:  # noqa: BLE001 - 文件没选上：关掉自己开的标签页，不留空页
                 if not page.is_closed():
                     page.close()
