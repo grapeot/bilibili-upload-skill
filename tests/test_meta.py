@@ -35,6 +35,7 @@ def test_collects_all_problems(write_meta):
     (["x" * 21], "21 chars"),
     ([""], "empty tag"),
     ("a,b", "list of strings"),
+    (["a,b"], "comma"),
 ])
 def test_tag_rules(write_meta, good_meta, tags, needle):
     good_meta["tags"] = tags
@@ -75,7 +76,19 @@ def test_parse_timestamp(value, seconds):
     assert parse_timestamp(value) == pytest.approx(seconds)
 
 
-@pytest.mark.parametrize("value", [-1, "abc", True, None, "1:60"])
+def test_title_rejects_line_breaks(write_meta, good_meta):
+    good_meta["title"] = "第一行\n第二行"
+    with pytest.raises(MetaError) as ei:
+        load_meta(write_meta(good_meta))
+    assert "line breaks" in str(ei.value)
+
+
+def test_title_is_stripped(write_meta, good_meta):
+    good_meta["title"] = "  标题  "
+    assert load_meta(write_meta(good_meta)).title == "标题"
+
+
+@pytest.mark.parametrize("value", [-1, "abc", True, None, "1:60", float("inf"), float("nan")])
 def test_parse_timestamp_rejects(value):
     with pytest.raises(ValueError):
         parse_timestamp(value)

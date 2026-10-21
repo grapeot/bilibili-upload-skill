@@ -2,7 +2,8 @@
 
 Chrome 用独立的持久 profile 启动，调试端口只绑定 127.0.0.1。脚本通过
 Playwright connect_over_cdp 接入，结束时只断开连接，不关闭浏览器。
-本模块不读取、不打印 cookie；status 只输出布尔值、URL 和页面标题。
+本模块不读取、不打印 cookie；status 只输出布尔值、标签页数量、接口返回码和页面主机名
+（不输出路径，避免个人空间页之类的地址带出账号 ID）。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +80,8 @@ def open_browser(session: Session, url: str = UPLOAD_URL) -> dict[str, Any]:
         return {"ok": False, "error": "Chrome not found; set BILI_CHROME_EXECUTABLE"}
     session.profile_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(session.profile_dir, 0o700)
+    if session.profile_dir.parent != Path.home():
+        os.chmod(session.profile_dir.parent, 0o700)  # browser.log 也放在这里
     log_path = session.profile_dir.parent / "browser.log"
     with open(log_path, "ab") as log:
         proc = subprocess.Popen(
@@ -109,6 +113,28 @@ def open_browser(session: Session, url: str = UPLOAD_URL) -> dict[str, Any]:
     return {"ok": False, "error": "CDP endpoint did not come up within 20s", "log": str(log_path)}
 
 
+def browser_matches(cmdlines: list[str], port: int, profile_dir: Path) -> bool:
+    """纯函数：是否有一个进程同时带着这个调试端口和这个 profile 启动。"""
+    want_port = f"--remote-debugging-port={port}"
+    want_dirs = {f"--user-data-dir={profile_dir}", f"--user-data-dir={profile_dir.resolve()}"}
+    for line in cmdlines:
+        if want_port in line.split() and any(d in line for d in want_dirs):
+            return True
+    return False
+
+
+def verify_own_browser(session: Session) -> dict[str, Any]:
+    """确认端口上的 Chrome 正是用 session.profile_dir 启动的那个，否则拒绝操作。"""
+    try:
+        out = subprocess.run(["ps", "-axww", "-o", "args="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"ok": False, "error": f"cannot list processes to verify the browser: {type(e).__name__}"}
+    if browser_matches(out.splitlines(), session.port, session.profile_dir):
+        return {"ok": True}
+    return {"ok": False, "error": f"the browser on port {session.port} was not started with this profile; "
+            "set --profile-dir / BILI_PROFILE_DIR to the profile used by `bili-upload open`"}
+
+
 def connect(p, session: Session):
     """接入已运行的 Chrome。调用方结束时只让 Playwright 退出，不关闭浏览器。"""
     browser = p.chromium.connect_over_cdp(session.endpoint, timeout=10000)
@@ -136,17 +162,22 @@ def status(session: Session) -> dict[str, Any]:
         return {"ok": False, "browser_connected": False, "hint": "run: bili-upload open"}
     from playwright.sync_api import sync_playwright
 
+    own = verify_own_browser(session)
+    if not own["ok"]:
+        return {**own, "browser_connected": True}
     with sync_playwright() as p:
         _, ctx = connect(p, session)
         pages = [pg for pg in ctx.pages if "bilibili.com" in pg.url]
         info: dict[str, Any] = {"ok": True, "browser_connected": True, "bilibili_tabs": len(pages)}
         page = pages[0] if pages else None
-        if page is None:
+        if page is None:  # 没有 B 站标签页时开一个探测页（不填写、不点击）
             page = ctx.new_page()
             page.goto("https://member.bilibili.com/", wait_until="domcontentloaded")
             info["opened_probe_tab"] = True
-        info["url"] = page.url.split("?")[0]
-        info["on_login_page"] = "passport.bilibili.com" in page.url
+        host = urllib.parse.urlsplit(page.url).hostname or ""
+        info["host"] = host
+        info["on_upload_page"] = page.url.startswith(UPLOAD_URL)
+        info["on_login_page"] = host == "passport.bilibili.com"
         info.update(check_login(page))
         if info.get("logged_in") is not True:
             info["hint"] = "请在浏览器窗口里扫码登录（工具不会代为登录）"

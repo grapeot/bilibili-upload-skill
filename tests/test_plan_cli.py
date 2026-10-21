@@ -39,10 +39,11 @@ def test_cli_invalid_meta_is_single_json(write_meta, capsys):
 
 
 def test_cli_usage_error_is_json(capsys):
-    try:
+    import pytest
+
+    with pytest.raises(SystemExit) as ei:
         run(["fill"])
-    except SystemExit as e:
-        assert e.code == 2
+    assert ei.value.code == 2
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is False and "usage" in out["error"]
 
@@ -59,3 +60,14 @@ def test_selectors_listing_offline(capsys, monkeypatch):
 def test_every_selector_has_note():
     for name, sel in SELECTORS.items():
         assert sel.css and sel.note, name
+
+
+def test_cli_version_is_json(capsys):
+    assert run(["--version"]) == 0
+    assert json.loads(capsys.readouterr().out)["version"]
+
+
+def test_cli_bad_env_is_json(capsys, monkeypatch):
+    monkeypatch.setenv("BILI_CDP_PORT", "abc")
+    assert run(["status"]) == 1
+    assert "ValueError" in json.loads(capsys.readouterr().out)["error"]

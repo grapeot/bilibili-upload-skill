@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -81,6 +82,7 @@ class UploadMeta:
         }
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _TS = re.compile(r"^(?:(\d+):)?(\d{1,2}):(\d{2})(?:\.(\d+))?$")
 
 
@@ -89,7 +91,7 @@ def parse_timestamp(value: Any) -> float:
     if isinstance(value, bool):
         raise ValueError(f"bad timestamp: {value!r}")
     if isinstance(value, (int, float)):
-        if value < 0:
+        if not math.isfinite(value) or value < 0:
             raise ValueError(f"negative timestamp: {value!r}")
         return float(value)
     if isinstance(value, str):
@@ -142,6 +144,8 @@ def parse_meta(data: dict[str, Any], base_dir: Path, check_files: bool = True) -
     if not isinstance(title, str) or not title.strip():
         problems.append("title: required")
         title = ""
+    elif (title := title.strip()) and _CONTROL.search(title):
+        problems.append("title: must not contain line breaks or control characters")
     elif len(title) > TITLE_MAX:
         problems.append(f"title: {len(title)} chars > {TITLE_MAX}")
 
@@ -169,6 +173,8 @@ def parse_meta(data: dict[str, Any], base_dir: Path, check_files: bool = True) -
         for t in tags:
             if not t:
                 problems.append("tags: empty tag")
+            elif "," in t or "，" in t:
+                problems.append(f"tags: {t!r} contains a comma (B站 splits tags on commas)")
             elif len(t) > TAG_MAX:
                 problems.append(f"tags: {t!r} is {len(t)} chars > {TAG_MAX}")
         if len(set(tags)) != len(tags):

@@ -82,12 +82,16 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 | `open [--url URL]` | 启动可见 Chrome；端口或 profile 被占用时拒绝 | 启动浏览器 |
 | `status` | 浏览器是否在线、`logged_in` 是否为 `true` | 只读 |
 | `fill --meta M` | 校验元数据并输出执行计划 | 不碰浏览器 |
-| `fill --meta M --execute` | 新开标签页、选视频（开始上传）、填表、等待上传、读回核对 | 填表，不提交 |
+| `fill --meta M --execute` | 新开标签页、选视频（开始上传）、填表、等待上传、读回核对；已有投稿标签页时拒绝，避免重复上传 | 填表，不提交 |
 | `fill --meta M --execute --reuse-tab` | 接入已选好视频的投稿标签页继续填，不再选文件，不会重复上传 | 填表，不提交 |
 | `readback --meta M` | 读回当前投稿标签页并与元数据比对 | 只读 |
 | `selectors` | 列出所有选择器；浏览器在线时统计当前投稿页的匹配数 | 只读 |
 
-`fill --execute` 的其他参数：`--upload-timeout 秒数`（默认 1800）、`--no-wait`（不等上传完成）。
+`fill --execute` 的其他参数：`--upload-timeout 秒数`（默认 1800）、`--no-wait`（不等上传完成）、`--new-upload`（明确要再上传一次时才用）。
+
+`status`、`fill --execute`、`readback`、`selectors` 连接前都会核对端口上的 Chrome 是用当前 profile 启动的；对不上就拒绝，并提示设置 `--profile-dir` 或 `BILI_PROFILE_DIR`。
+
+`fill --execute` 一旦选了文件，即使后续步骤出错也会返回完整的部分报告（`video_selected: true`）。重试时用 `--reuse-tab`，它会按视频文件名找到原来的标签页继续填。
 
 ## 实现状态
 

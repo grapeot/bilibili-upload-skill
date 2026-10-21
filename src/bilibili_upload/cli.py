@@ -26,10 +26,10 @@ class _Parser(argparse.ArgumentParser):
 
 def build_parser() -> argparse.ArgumentParser:
     ap = _Parser(prog="bili-upload", description="在可见 Chrome 里填写 B 站投稿表单，停在提交前。")
-    ap.add_argument("--version", action="version", version=__version__)
+    ap.add_argument("--version", action="store_true", help="输出版本号")
     ap.add_argument("--port", type=int, help="CDP 端口（默认 $BILI_CDP_PORT 或 9341）")
     ap.add_argument("--profile-dir", help="Chrome profile 目录（默认 $BILI_PROFILE_DIR 或 ~/.bilibili-upload/browser-profile）")
-    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=_Parser)
+    sub = ap.add_subparsers(dest="cmd", parser_class=_Parser)
 
     o = sub.add_parser("open", help="启动可见 Chrome（端口或 profile 被占用时拒绝）")
     o.add_argument("--url", default=UPLOAD_URL)
@@ -40,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--execute", action="store_true", help="真正执行：选择视频（开始上传）并填表")
     f.add_argument("--reuse-tab", action="store_true", help="接入已选好视频的投稿标签页，不再选择文件")
     f.add_argument("--upload-timeout", type=float, default=1800, help="等待上传处理的秒数（默认 1800）")
+    f.add_argument("--new-upload", action="store_true", help="已有投稿标签页时仍新开一个上传（会再上传一次）")
     f.add_argument("--no-wait", action="store_true", help="不等待上传完成")
 
     r = sub.add_parser("readback", help="只读：把当前投稿标签页的字段读回并与元数据比对")
@@ -49,15 +50,18 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _with_upload_tab(session, fn) -> dict[str, Any]:
+def _with_upload_tab(session, fn, video_name: str | None = None) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
-    from .browser import connect
+    from .browser import connect, verify_own_browser
     from .fill import find_upload_tab
 
+    own = verify_own_browser(session)
+    if not own["ok"]:
+        return own
     with sync_playwright() as p:
         _, ctx = connect(p, session)
-        page = find_upload_tab(ctx)
+        page = find_upload_tab(ctx, video_name)
         if page is None:
             return {"ok": False, "error": "no upload tab with a selected video found"}
         return fn(page)
@@ -65,9 +69,13 @@ def _with_upload_tab(session, fn) -> dict[str, Any]:
 
 def run(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    session = session_from_env(args.port, args.profile_dir)
     try:
-        if args.cmd == "open":
+        session = session_from_env(args.port, args.profile_dir)
+        if args.version:
+            out = {"ok": True, "version": __version__}
+        elif args.cmd is None:
+            out = {"ok": False, "error": "usage: a command is required (open, status, fill, readback, selectors)"}
+        elif args.cmd == "open":
             out = open_browser(session, args.url)
         elif args.cmd == "status":
             out = status(session)
@@ -80,13 +88,16 @@ def run(argv: list[str] | None = None) -> int:
             else:
                 from .fill import execute
 
-                out = execute(session, meta, reuse_tab=args.reuse_tab,
-                              upload_timeout_s=args.upload_timeout, wait_for_upload=not args.no_wait)
+                out = execute(session, meta, reuse_tab=args.reuse_tab, upload_timeout_s=args.upload_timeout,
+                              wait_for_upload=not args.no_wait, new_upload=args.new_upload)
         elif args.cmd == "readback":
             meta = load_meta(args.meta)
             from .fill import readback, upload_state
 
-            out = _with_upload_tab(session, lambda pg: {"ok": True, "upload": upload_state(pg), **readback(pg, meta)})
+            def rb(pg):
+                res = readback(pg, meta)
+                return {"ok": not res["mismatches"], "upload": upload_state(pg), **res}
+            out = _with_upload_tab(session, rb, meta.video.name)
         elif args.cmd == "selectors":
             listing = {k: {"css": v.css, "note": v.note} for k, v in SELECTORS.items()}
             from .browser import port_in_use
@@ -104,6 +115,8 @@ def run(argv: list[str] | None = None) -> int:
             out = {"ok": False, "error": f"unknown command {args.cmd}"}
     except MetaError as e:
         out = {"ok": False, "error": "invalid metadata", "problems": e.problems}
+    except KeyboardInterrupt:
+        out = {"ok": False, "error": "interrupted"}
     except Exception as e:  # noqa: BLE001 - 原样透出异常类型和信息
         out = {"ok": False, "error": f"{type(e).__name__}: {e}"}
     _emit(out)
