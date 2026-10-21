@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _with_upload_tab(session, fn, video_name: str | None = None) -> dict[str, Any]:
+def _with_upload_tab(session, fn, video=None) -> dict[str, Any]:
     from playwright.sync_api import sync_playwright
 
     from .browser import connect, verify_own_browser
@@ -61,7 +61,7 @@ def _with_upload_tab(session, fn, video_name: str | None = None) -> dict[str, An
         return own
     with sync_playwright() as p:
         _, ctx = connect(p, session)
-        page = find_upload_tab(ctx, video_name)
+        page = find_upload_tab(ctx, video)
         if page is None:
             return {"ok": False, "error": "no upload tab with a selected video found"}
         return fn(page)
@@ -97,7 +97,7 @@ def run(argv: list[str] | None = None) -> int:
             def rb(pg):
                 res = readback(pg, meta)
                 return {"ok": not res["mismatches"], "upload": upload_state(pg), **res}
-            out = _with_upload_tab(session, rb, meta.video.name)
+            out = _with_upload_tab(session, rb, meta.video)
         elif args.cmd == "selectors":
             listing = {k: {"css": v.css, "note": v.note} for k, v in SELECTORS.items()}
             from .browser import port_in_use

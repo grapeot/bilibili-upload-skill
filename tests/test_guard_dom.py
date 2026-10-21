@@ -19,6 +19,12 @@ HTML = """
   <div id="wrapper" class="wrap"><span class="btn-submit-x">ok</span></div>
   <form><input id="forminput" class="inp"><button>发送</button></form>
   <input id="plain" class="inp">
+  <div class="btn-primary" onclick="window.hit=1"><i id="ic">&nbsp;</i><span>立即投稿</span></div>
+  <div class="pub" style="cursor:pointer"><span id="child2">确认</span><span>发布</span></div>
+  <label for="sb" id="lab">选项</label><button id="sb">立即投稿</button>
+  <form onsubmit="window.submitted=1;return false"><input id="single" class="inp"></form>
+  <div class="setting"><div class="ql-editor" contenteditable="true" id="ed">投稿后发布</div></div>
+  <input type="file" id="fileinput">
   <div id="cover" style="position:relative;width:200px;height:40px">covered
     <div class="submit-add" style="position:absolute;inset:0;background:#fff">立即投稿</div></div>
 </div></body></html>
@@ -41,7 +47,7 @@ def test_allows_plain_control(page):
     safe_click(page.locator("#ok"))
 
 
-@pytest.mark.parametrize("sel", ["#icon", "#deep", "#long", "#wrapper", "#cover"])
+@pytest.mark.parametrize("sel", ["#icon", "#deep", "#long", "#wrapper", "#cover", "#ic", "#child2", "#lab"])
 def test_rejects_hidden_submit_paths(page, sel):
     with pytest.raises(ForbiddenClick):
         safe_click(page.locator(sel))
@@ -64,3 +70,27 @@ def test_press_refused_when_focus_moved(page):
     page.evaluate("document.activeElement && document.activeElement.blur()")
     with pytest.raises(ForbiddenClick):
         safe_press(page, h, "Enter")
+
+
+def test_press_refused_in_single_input_form(page):
+    with pytest.raises(ForbiddenClick):
+        focus_editable(page.locator("#single"))
+    assert page.evaluate("window.submitted") is None
+
+
+def test_editor_with_forbidden_user_text_is_editable(page):
+    h = focus_editable(page.locator("#ed"))
+    safe_press(page, h, "End")
+
+
+def test_set_local_files_via_cdp(page, tmp_path):
+    from bilibili_upload.fill import set_local_files
+
+    f = tmp_path / "clip.mp4"
+    f.write_bytes(b"\x00" * 8)
+    set_local_files(page, "#fileinput", f)
+    assert page.evaluate("document.querySelector('#fileinput').files[0].name") == "clip.mp4"
+    with pytest.raises(RuntimeError):
+        set_local_files(page, "#plain", f)
+    with pytest.raises(RuntimeError):
+        set_local_files(page, "#nope", f)

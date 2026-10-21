@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -116,11 +117,8 @@ def open_browser(session: Session, url: str = UPLOAD_URL) -> dict[str, Any]:
 def browser_matches(cmdlines: list[str], port: int, profile_dir: Path) -> bool:
     """纯函数：是否有一个进程同时带着这个调试端口和这个 profile 启动。"""
     want_port = f"--remote-debugging-port={port}"
-    want_dirs = {f"--user-data-dir={profile_dir}", f"--user-data-dir={profile_dir.resolve()}"}
-    for line in cmdlines:
-        if want_port in line.split() and any(d in line for d in want_dirs):
-            return True
-    return False
+    pats = [re.compile(re.escape(f"--user-data-dir={d}") + r"(\s|$)") for d in {profile_dir, profile_dir.resolve()}]
+    return any(want_port in line.split() and any(pt.search(line) for pt in pats) for line in cmdlines)
 
 
 def verify_own_browser(session: Session) -> dict[str, Any]:

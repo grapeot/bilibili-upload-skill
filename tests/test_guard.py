@@ -44,6 +44,8 @@ def test_click_verdict_checks_interactive_ancestor_and_hit_target():
     assert click_verdict({"self": ok, "inter": {"text": "立即投稿", "cls": "btn"}}) is not None
     assert click_verdict({"self": ok, "hit": {"text": "", "cls": "submit-add"}}) is not None
     assert click_verdict({"self": ok, "containsSubmit": True}) is not None
+    assert click_verdict({"self": ok, "ancestorButton": "ancestor with short text"}) is not None
+    assert click_verdict({"self": ok, "control": {"text": "立即投稿", "cls": ""}}) is not None
     assert click_verdict({"self": ok}) is None
 
 
@@ -52,6 +54,7 @@ def test_focus_verdict():
     assert focus_verdict(good) is None
     assert focus_verdict({**good, "focused": False}) is not None
     assert focus_verdict({**good, "formHasSubmit": True}) is not None
+    assert focus_verdict({**good, "inForm": True}) is not None
     assert focus_verdict({"focused": True, "active": {"editable": False, "text": "确定"}}) is not None
 
 

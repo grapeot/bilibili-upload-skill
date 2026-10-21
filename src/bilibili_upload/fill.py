@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any
@@ -71,13 +72,44 @@ def _exact(text: str) -> re.Pattern:
     return re.compile(rf"^\s*{re.escape(text)}\s*$")
 
 
+def set_local_files(page, selector: str, path) -> None:
+    """让 Chrome 直接从本机磁盘读取文件，交给页面上的文件输入框。
+
+    connect_over_cdp 接入的浏览器在 Playwright 看来是「远程」的，set_input_files 会把文件
+    内容经 CDP 传过去，并且限制在 50 MB 以内，真实视频几乎都超过。浏览器与本工具在同一台
+    机器上，所以改用 CDP 的 DOM.setFileInputFiles 只传绝对路径。
+    """
+    from pathlib import Path
+
+    abs_path = str(Path(path).expanduser().resolve())
+    cdp = page.context.new_cdp_session(page)
+    try:
+        res = cdp.send("Runtime.evaluate", {
+            "expression": f"document.querySelector({json.dumps(selector)})",
+            "returnByValue": False,
+        })
+        result = res.get("result", {})
+        oid = result.get("objectId")
+        if not oid or result.get("subtype") == "null":
+            raise RuntimeError(f"file input not found for selector {selector!r}")
+        desc = cdp.send("Runtime.callFunctionOn", {
+            "objectId": oid, "returnByValue": True,
+            "functionDeclaration": "function () { return this.tagName + ':' + (this.type || ''); }",
+        })
+        if desc.get("result", {}).get("value") != "INPUT:file":
+            raise RuntimeError(f"selector {selector!r} is not an <input type=file>")
+        cdp.send("DOM.setFileInputFiles", {"files": [abs_path], "objectId": oid})
+    finally:
+        cdp.detach()
+
+
 # ---------------------------------------------------------------- 各字段步骤
 
 def step_title(form: Form, meta: UploadMeta):
     if form.find("title", timeout=60000) is None:
         return False
     handle = safe_fill(form.page.locator(css("title")), "")  # 清掉自动带入的文件名
-    handle.fill(meta.title)
+    handle = safe_fill(form.page.locator(css("title")), meta.title)
     if handle.input_value() != meta.title:
         raise RuntimeError("title readback differs after fill")
 
@@ -92,7 +124,7 @@ def step_cover(form: Form, meta: UploadMeta):
     inp = form.find("cover_file_input", timeout=5000, state="attached")
     if inp is None:
         return False
-    inp.first.set_input_files(str(meta.cover))
+    set_local_files(form.page, css("cover_file_input"), meta.cover)
     form.page.wait_for_timeout(3000)
     dialog = form.page.locator(css("cover_dialog")).first
     for label in ("完成", "确定"):
@@ -227,23 +259,26 @@ def step_chapters(form: Form, meta: UploadMeta):
 _UPLOAD_JS = """(sel) => {
   const items = Array.from(document.querySelectorAll(sel));
   const text = items.map(e => e.innerText).join(' | ').replace(/\\s+/g, ' ').trim();
-  return {items: items.length, text: text.slice(0, 300)};
+  return {items: items.length, text};
 }"""
 
-_IN_PROGRESS = re.compile(r"上传中|处理中|转码中|(?<!\d)(?:\d|[1-9]\d)(?:\.\d+)?%")
+_IN_PROGRESS = re.compile(r"上传中|处理中|转码中|(?<![\d.])(?:\d|[1-9]\d)(?:\.\d+)?%")
 
 
 def classify_upload(items: int, text: str) -> dict[str, Any]:
     """纯函数：根据上传条目文字判断状态。"""
     failed = bool(re.search(r"失败|错误", text))
     in_progress = bool(_IN_PROGRESS.search(text))
-    done = items > 0 and not failed and not in_progress and bool(re.search(r"上传完成|已完成|处理完成|100%", text))
+    done = items > 0 and not failed and not in_progress and bool(re.search(r"上传完成|已完成|处理完成|100(?:\.0+)?%", text))
     return {"items": items, "text": text, "done": done, "failed": failed, "in_progress": in_progress}
 
 
-def upload_state(page) -> dict[str, Any]:
+def upload_state(page, full_text: bool = False) -> dict[str, Any]:
     st = page.evaluate(_UPLOAD_JS, css("upload_item"))
-    return classify_upload(st.get("items", 0), st.get("text", ""))
+    out = classify_upload(st.get("items", 0), st.get("text", ""))
+    if not full_text:
+        out["text"] = out["text"][:300]
+    return out
 
 
 def wait_upload(page, timeout_s: float, form: Form | None = None, grace_s: float = 30) -> dict[str, Any]:
@@ -345,14 +380,24 @@ def find_upload_tabs(ctx) -> list:
             if pg.url.startswith(UPLOAD_URL) and pg.locator(css("title")).count()]
 
 
-def find_upload_tab(ctx, video_name: str | None = None):
+def tab_matches_video(text: str, video) -> bool:
+    """纯函数：上传条目文字里是否出现视频文件名或去掉扩展名的文件名。"""
+    return video.name in text or (len(video.stem) >= 4 and video.stem in text)
+
+
+def find_upload_tab(ctx, video=None):
     for pg in find_upload_tabs(ctx):
-        if video_name is None:
-            return pg
-        st = upload_state(pg)
-        if video_name in st["text"]:
+        if video is None or tab_matches_video(upload_state(pg, full_text=True)["text"], video):
             return pg
     return None
+
+
+def describe_upload_tabs(ctx) -> list[dict[str, Any]]:
+    return [{"upload_item_text": upload_state(pg)["text"][:120]} for pg in find_upload_tabs(ctx)]
+
+
+ASK_HUMAN = ("ask the human which tab holds this video; do not start another upload "
+             "(--new-upload only when the human explicitly asks for a second upload)")
 
 
 def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
@@ -361,33 +406,42 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
 
     from .browser import check_login, connect, verify_own_browser
 
+    own = verify_own_browser(session)
+    if not own["ok"]:
+        return own
     with sync_playwright() as p:
         browser, ctx = connect(p, session)
-        own = verify_own_browser(session)
-        if not own["ok"]:
-            return own
         if reuse_tab:
-            page = find_upload_tab(ctx, meta.video.name)
+            page = find_upload_tab(ctx, meta.video)
             if page is None:
-                return {"ok": False, "error": f"no upload tab showing {meta.video.name!r}; run without --reuse-tab"}
+                tabs = describe_upload_tabs(ctx)
+                return {"ok": False, "error": f"no upload tab matches {meta.video.name!r}",
+                        "upload_tabs": tabs, "next": ASK_HUMAN if tabs else
+                        "no upload tab is open; only then is a run without --reuse-tab appropriate"}
+            form = Form(page)
         else:
             if find_upload_tabs(ctx) and not new_upload:
-                return {"ok": False, "error": "an upload tab with a selected video already exists; "
-                        "use --reuse-tab to continue it, or --new-upload to start another upload"}
+                return {"ok": False, "error": "an upload tab with a selected video already exists",
+                        "upload_tabs": describe_upload_tabs(ctx),
+                        "next": "continue it with --reuse-tab; if it holds a different video, " + ASK_HUMAN}
             page = ctx.new_page()
-            page.goto(UPLOAD_URL, wait_until="domcontentloaded")
-            login = check_login(page)
-            if login.get("logged_in") is not True:
-                return {"ok": False, "error": "not logged in; ask the human to scan the QR code", **login}
-        page.bring_to_front()
-        form = Form(page)
-
-        if not reuse_tab:
-            inp = form.find("file_input", timeout=20000, state="attached")
-            if inp is None:
-                return {"ok": False, "error": "video file input not found", "missing_selectors": form.missing}
-            inp.first.set_input_files(str(meta.video))  # 上传从这里开始
+            form = Form(page)
+            try:
+                page.goto(UPLOAD_URL, wait_until="domcontentloaded")
+                login = check_login(page)
+                if login.get("logged_in") is not True:
+                    page.close()
+                    return {"ok": False, "error": "not logged in; ask the human to scan the QR code", **login}
+                if form.find("file_input", timeout=20000, state="attached") is None:
+                    page.close()
+                    return {"ok": False, "error": "video file input not found", "missing_selectors": form.missing}
+                set_local_files(page, css("file_input"), meta.video)  # 上传从这里开始
+            except Exception as e:  # noqa: BLE001 - 文件没选上：关掉自己开的标签页，不留空页
+                if not page.is_closed():
+                    page.close()
+                return {"ok": False, "video_selected": False, "error": f"{type(e).__name__}: {e}"}
             form.filled.append("select_video")
+        page.bring_to_front()
 
         upload: dict[str, Any] = {}
         check: dict[str, Any] = {"values": {}, "mismatches": {}, "missing": []}

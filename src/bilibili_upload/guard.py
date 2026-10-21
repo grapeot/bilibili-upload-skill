@@ -8,7 +8,10 @@
 - 元素中心点实际命中的元素（elementFromPoint）及其可交互祖先。
 任何一项像提交或存草稿，就抛出 ForbiddenClick，不点击。宁可误拒，不可误点。
 
-按键前，守卫要求焦点在预期的可编辑元素上，且该元素不在带提交按钮的 <form> 里。
+- 元素和命中元素的所有祖先里，是否有文字很短或可点击、且文字含禁词的元素（div/span 拼成的按钮）；
+- 若在 <label> 里，label 关联的控件。
+
+按键前，守卫要求焦点在预期的可编辑元素上，且该元素不在任何 <form> 里。
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ SUBMIT_CSS = ".submit-container, .submit-add"
 
 _COMMON_JS = r"""
 const FORBID_CLS = %(cls)s;
+const FORBID_TXT = %(txt)s;
+const hasWord = (t) => FORBID_TXT.some(w => t.includes(w));
 const SUBMIT_CSS = %(submit)s;
 const clsOf = (e) => (e && (typeof e.className === 'string' ? e.className : (e.getAttribute && e.getAttribute('class')) || '')) || '';
 const parentOf = (e) => e.parentElement || (e.getRootNode && e.getRootNode().host) || null;
@@ -59,15 +64,38 @@ const containsSubmit = (e) => {
 """
 
 _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
-  const out = {self: describe(el), inter: null, hit: null, hitInter: null, containsSubmit: containsSubmit(el)};
+  // 祖先里任何「短文字含禁词」或「可点击且文字含禁词」的元素都视为提交按钮（div/span 拼成的按钮）
+  const ancestorButton = (e) => {
+    const own = isEditable(el) ? (el.innerText || '') : '';
+    for (let p = e; p; p = parentOf(p)) {
+      if (p.nodeType !== 1) continue;
+      let t = (p.innerText || '');
+      if (own) t = t.split(own).join('');
+      t = t.trim();
+      if (!t || !hasWord(t)) continue;
+      if (t.length <= 12) return `ancestor with short text ${JSON.stringify(t)}`;
+      const st = getComputedStyle(p);
+      const pointer = p.hasAttribute('onclick') || p.hasAttribute('tabindex') || st.cursor === 'pointer';
+      if (pointer && t.length <= 60) return `clickable ancestor with text ${JSON.stringify(t.slice(0, 20))}`;
+    }
+    return null;
+  };
+  const out = {self: describe(el), inter: null, hit: null, hitInter: null, control: null,
+               containsSubmit: containsSubmit(el), ancestorButton: ancestorButton(el)};
   const i = interactive(el);
   if (i && i !== el) out.inter = describe(i);
+  const lab = el.closest ? el.closest('label') : null;
+  if (lab && lab.control && lab.control !== el) {
+    out.control = describe(lab.control);
+    if (containsSubmit(lab.control)) out.containsSubmit = true;
+  }
   const r = el.getBoundingClientRect();
   const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
   if (hit && hit !== el) {
     out.hit = describe(hit);
     const hi = interactive(hit);
     if (hi && hi !== hit && hi !== i) out.hitInter = describe(hi);
+    out.ancestorButton = out.ancestorButton || ancestorButton(hit);
   }
   return out;
 }"""
@@ -75,17 +103,17 @@ _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
 _INSPECT_FOCUS_JS = "(el) => {" + _COMMON_JS + r"""
   const a = document.activeElement;
   const ok = !!a && (a === el || el.contains(a));
-  let formHasSubmit = false;
-  const f = a && a.form;
-  if (f) formHasSubmit = !!f.querySelector('button:not([type]), button[type=submit], input[type=submit], input[type=image]');
-  return {focused: ok, active: describe(a), formHasSubmit};
+  // 处在任何 <form> 里都拒绝：回车可能触发隐式提交
+  const inForm = !!(a && (a.form || (a.closest && a.closest('form'))));
+  return {focused: ok, active: describe(a), inForm};
 }"""
 
 
 def _js(template: str) -> str:
     import json
 
-    return template % {"cls": json.dumps(list(FORBIDDEN_CLASS_FRAGMENTS)), "submit": json.dumps(SUBMIT_CSS)}
+    return template % {"cls": json.dumps(list(FORBIDDEN_CLASS_FRAGMENTS)), "submit": json.dumps(SUBMIT_CSS),
+                       "txt": json.dumps(list(FORBIDDEN_TEXTS), ensure_ascii=False)}
 
 
 INSPECT_CLICK_JS = _js(_INSPECT_CLICK_JS)
@@ -121,7 +149,9 @@ def click_verdict(report: dict[str, Any]) -> str | None:
     """纯函数：综合点击检查报告，返回拒绝理由或 None。"""
     if report.get("containsSubmit"):
         return "element contains a submit-like control"
-    for key in ("self", "inter", "hit", "hitInter"):
+    if report.get("ancestorButton"):
+        return report["ancestorButton"]
+    for key in ("self", "inter", "hit", "hitInter", "control"):
         reason = forbidden_reason(report.get(key))
         if reason:
             return f"{key}: {reason}"
@@ -135,8 +165,8 @@ def focus_verdict(report: dict[str, Any]) -> str | None:
     active = report.get("active") or {}
     if not active.get("editable"):
         return "focused element is not editable"
-    if report.get("formHasSubmit"):
-        return "focused element is inside a form with a submit button"
+    if report.get("inForm") or report.get("formHasSubmit"):
+        return "focused element is inside a <form> (Enter could submit it)"
     return forbidden_reason(active)
 
 

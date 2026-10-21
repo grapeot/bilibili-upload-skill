@@ -101,6 +101,13 @@ bili-upload fill --meta upload.json --execute   # 选视频、填表、读回核
 | `open` / `status` / `readback` / `selectors` | 已实现 |
 | `fill --execute` | 已实现；选择器以真实新投稿页为准，B 站改版后可能需要更新 |
 
+## 已知限制与坑
+
+- **大文件不能用 Playwright 的 `set_input_files`。** 通过 `connect_over_cdp` 接入的浏览器在 Playwright 看来是远程浏览器，`set_input_files` 会把文件内容经 CDP 传过去，上限 50 MB，真实视频几乎都超过，报错为 `Cannot transfer files larger than 50Mb to a browser not co-located with the server`。本工具改用 CDP 的 `DOM.setFileInputFiles`，只把本机绝对路径交给 Chrome，由 Chrome 自己从磁盘读取。前提是 Chrome 和本工具在同一台机器上。
+- 选文件之前出错时，`fill --execute` 会关掉自己新开的标签页，不留空的投稿页。
+- 章节编辑还没有自动化，执行结果会把章节列在 `human_steps` 里。
+- 字幕默认开关、字幕语言、封面最终效果需要人在页面上确认。
+
 ## 故障排查
 
 - `missing_selectors` 非空：B 站可能改版。打开浏览器开发者工具找到新结构，只改 `src/bilibili_upload/selectors.py`。

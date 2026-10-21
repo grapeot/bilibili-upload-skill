@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from bilibili_upload.browser import browser_matches
-from bilibili_upload.fill import classify_upload, compare
+from bilibili_upload.fill import classify_upload, compare, tab_matches_video
 from bilibili_upload.meta import parse_meta
 
 
@@ -17,6 +17,8 @@ def test_classify_upload():
     assert classify_upload(1, "v.mp4 5.5%")["in_progress"] is True
     assert classify_upload(1, "v.mp4 上传失败")["failed"] is True
     assert classify_upload(0, "")["done"] is False
+    assert classify_upload(1, "上传完成 100.0%")["done"] is True
+    assert classify_upload(1, "100.00%")["done"] is True
 
 
 def test_compare_reports_null_as_missing(tmp_path):
@@ -48,3 +50,12 @@ def test_browser_matches():
     assert browser_matches(lines, 9341, prof)
     assert not browser_matches(lines, 9222, prof)
     assert not browser_matches(lines, 93410, prof)
+    assert not browser_matches(["C --remote-debugging-port=9341 --user-data-dir=/tmp/prof-old"], 9341, prof)
+    assert browser_matches(["C --remote-debugging-port=9341 --user-data-dir=/tmp/prof"], 9341, prof)
+
+
+def test_tab_matches_video():
+    v = Path("/x/my_video_v4.mp4")
+    assert tab_matches_video("my_video_v4.mp4 上传完成", v)
+    assert tab_matches_video("my_video_v4 上传中 3%", v)
+    assert not tab_matches_video("other.mp4", v)
