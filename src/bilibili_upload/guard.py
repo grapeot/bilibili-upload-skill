@@ -66,7 +66,8 @@ const containsSubmit = (e) => {
 
 _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
   // 祖先里任何「短文字含禁词」或「可点击且文字含禁词」的元素都视为提交按钮（div/span 拼成的按钮）
-  const EDITABLE_CSS = 'input, textarea, [contenteditable=""], [contenteditable="true"]';
+  const EDITABLE_CSS = 'input:not([type]), input[type=text], input[type=search], input[type=email], input[type=url], ' +
+    'input[type=number], input[type=tel], input[type=password], textarea, [contenteditable=""], [contenteditable="true"]';
   const ancestorButton = (e) => {
     for (let p = e; p; p = parentOf(p)) {
       if (p.nodeType !== 1) continue;

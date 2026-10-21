@@ -476,8 +476,11 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
                     return {"ok": False, "error": "upload area not found", "missing_selectors": form.missing}
                 select_file_via_chooser(page, page.locator(css("upload_area")), meta.video, ".mp4")  # 上传从这里开始
             except Exception as e:  # noqa: BLE001 - 文件没选上：关掉自己开的标签页，不留空页
-                if not page.is_closed() and not page.locator(css("title")).count():
-                    page.close()
+                try:
+                    if not page.is_closed() and not page.locator(css("title")).count():
+                        page.close()
+                except Exception:  # noqa: BLE001 - 页面已崩溃或跳走：保持原样，交给人
+                    pass
                 return {"ok": False, "video_selected": None if not page.is_closed() else False,
                         "error": f"{type(e).__name__}: {e}"}
             form.filled.append("select_video")
