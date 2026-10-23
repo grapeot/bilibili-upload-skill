@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .meta import UploadMeta
+from .meta import UploadMeta, picker_time
 
 # 永远留给人的步骤
 ALWAYS_HUMAN = [
@@ -44,6 +44,9 @@ def build_plan(meta: UploadMeta, reuse_tab: bool = False) -> dict[str, Any]:
         add("chapters", [{"time": c.timestamp, "title": c.title} for c in meta.chapters])
     if meta.dynamic:
         add("dynamic", {"chars": len(meta.dynamic)})
+    if meta.schedule:
+        add("schedule", {"at": meta.schedule.isoformat(), "picker": picker_time(meta.schedule),
+                         "note": "打开定时发布，按选择器默认的北京时间选日期和时间；时间须在执行时之后 5 分钟到 15 天内"})
     add("dismiss_dialogs", "每一步前用 x 关闭已知无害弹窗（如上传完成通知），其他弹窗按文字报告")
     add("wait_upload", "等待视频上传与处理")
     add("readback", "逐项读回并与元数据比对")

@@ -34,6 +34,12 @@ HTML = """
     <div class="cover-editor-content"><div class="cover-editor-button"><div class="button submit" id="otherok">完成</div></div></div></div>
   <div class="bcc-dialog" id="mixdlg"><div>封面制作 立即投稿</div>
     <div class="cover-editor-content"><div class="cover-editor-button"><div class="button submit" id="mixok">完成</div></div></div></div>
+  <div class="sub"><button id="plainbtn" class="bcc-button">上传字幕</button></div>
+  <form><button id="formbtn" class="bcc-button">编辑章节</button></form>
+  <button id="explicitbtn" type="submit" class="bcc-button">编辑章节</button>
+  <button id="bogusbtn" type="bogus" class="bcc-button">编辑章节</button>
+  <div class="time-container"><h3>定时发布</h3><div class="time-switch-wrp"><div class="switch-container" id="sched" style="width:40px;height:20px">
+    <span class="switch-roll"></span></div><span>(可选择距离当前最早≥5分钟/最晚≤15天的时间，花火、预约、互动视频稿件不可修改/取消)</span></div></div>
   <div id="cover" style="position:relative;width:200px;height:40px">covered
     <div class="submit-add" style="position:absolute;inset:0;background:#fff">立即投稿</div></div>
 </div></body></html>
@@ -56,7 +62,13 @@ def test_allows_plain_control(page):
     safe_click(page.locator("#ok"))
 
 
-@pytest.mark.parametrize("sel", ["#icon", "#deep", "#long", "#wrapper", "#cover", "#ic", "#child2", "#lab"])
+@pytest.mark.parametrize("sel", ["#plainbtn", "#sched"])
+def test_allows_untyped_button_outside_form_and_schedule_switch(page, sel):
+    safe_click(page.locator(sel))
+
+
+@pytest.mark.parametrize("sel", ["#icon", "#deep", "#long", "#wrapper", "#cover", "#ic", "#child2", "#lab",
+                                 "#formbtn", "#explicitbtn", "#bogusbtn"])
 def test_rejects_hidden_submit_paths(page, sel):
     with pytest.raises(ForbiddenClick):
         safe_click(page.locator(sel))

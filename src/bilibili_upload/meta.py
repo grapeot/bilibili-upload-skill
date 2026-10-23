@@ -6,6 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +19,14 @@ CHAPTER_TITLE_MAX = 16  # B 站：请保证章节名称字数不超过16字（�
 CHAPTER_MIN_GAP_S = 5
 VIDEO_EXTS = {".mp4", ".flv", ".avi", ".wmv", ".mov", ".webm", ".mpeg4", ".ts", ".mpg", ".rm", ".rmvb", ".mkv", ".m4v"}
 COVER_EXTS = {".jpg", ".jpeg", ".png"}
+# 定时发布：选择器默认按北京时间显示，分钟只能选 5 的倍数，时间须在当前之后 5 分钟到 15 天之间
+PICKER_TZ = timezone(timedelta(hours=8))
+SCHEDULE_MIN_LEAD = timedelta(minutes=5)
+SCHEDULE_MAX_LEAD = timedelta(days=15)
 VISIBILITIES = ("public", "self")
 KNOWN_KEYS = {
     "video", "title", "cover", "cover_4x3", "creation_statement", "partition", "tags", "description",
-    "chapters", "subtitles", "visibility", "dynamic",
+    "chapters", "subtitles", "visibility", "dynamic", "schedule",
 }
 
 
@@ -64,6 +69,7 @@ class UploadMeta:
     subtitles: Subtitles | None = None
     visibility: str = "public"
     dynamic: str = ""
+    schedule: datetime | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -83,6 +89,10 @@ class UploadMeta:
             ),
             "visibility": self.visibility,
             "dynamic": self.dynamic,
+            "schedule": (
+                {"at": self.schedule.isoformat(), "picker": picker_time(self.schedule)}
+                if self.schedule else None
+            ),
         }
 
 
@@ -114,6 +124,36 @@ def format_timestamp(seconds: float) -> str:
     h, rem = divmod(s, 3600)
     m, sec = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
+
+
+def parse_schedule(value: Any) -> datetime:
+    """带时区偏移的 ISO 8601 时间（如 2026-10-23T16:00-07:00）-> 带时区的 datetime。"""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("must be an ISO 8601 time string with an offset, e.g. 2026-10-23T16:00-07:00")
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(f"not an ISO 8601 time: {value!r}") from None
+    if dt.tzinfo is None:
+        raise ValueError(f"{value!r} has no UTC offset; write it as e.g. 2026-10-23T16:00-07:00")
+    if dt.second or dt.microsecond or dt.minute % 5:
+        raise ValueError(f"{value!r}: the page only offers whole minutes in steps of 5")
+    return dt
+
+
+def picker_time(dt: datetime) -> dict[str, str]:
+    """定时发布选择器里应当显示的日期和时间（北京时间）。"""
+    local = dt.astimezone(PICKER_TZ)
+    return {"date": local.strftime("%Y-%m-%d"), "time": local.strftime("%H:%M"), "tz": "UTC+08:00"}
+
+
+def schedule_window_problem(dt: datetime, now: datetime) -> str | None:
+    """纯函数：定时时间是否落在 B 站允许的窗口里（当前之后 5 分钟到 15 天）。"""
+    if dt - now < SCHEDULE_MIN_LEAD:
+        return f"schedule {dt.isoformat()} is less than 5 minutes from now"
+    if dt - now > SCHEDULE_MAX_LEAD:
+        return f"schedule {dt.isoformat()} is more than 15 days from now"
+    return None
 
 
 def _resolve(base: Path, value: str) -> Path:
@@ -251,6 +291,13 @@ def parse_meta(data: dict[str, Any], base_dir: Path, check_files: bool = True) -
     elif len(dynamic) > DYNAMIC_MAX:
         problems.append(f"dynamic: {len(dynamic)} chars > {DYNAMIC_MAX}")
 
+    schedule = None
+    if data.get("schedule") is not None:
+        try:
+            schedule = parse_schedule(data["schedule"])
+        except ValueError as e:
+            problems.append(f"schedule: {e}")
+
     if problems:
         raise MetaError(problems)
     assert video is not None
@@ -258,6 +305,7 @@ def parse_meta(data: dict[str, Any], base_dir: Path, check_files: bool = True) -
         video=video, title=title, creation_statement=statement.strip(), cover=cover, cover_4x3=cover_4x3,
         partition=partition.strip() if partition else None, tags=tags, description=desc,
         chapters=chapters, subtitles=subtitles, visibility=visibility, dynamic=dynamic,
+        schedule=schedule,
     )
 
 
