@@ -130,8 +130,11 @@ def parse_schedule(value: Any) -> datetime:
     """带时区偏移的 ISO 8601 时间（如 2026-10-23T16:00-07:00）-> 带时区的 datetime。"""
     if not isinstance(value, str) or not value.strip():
         raise ValueError("must be an ISO 8601 time string with an offset, e.g. 2026-10-23T16:00-07:00")
+    text = value.strip()
+    if text[-1:] in ("Z", "z"):  # Python 3.10 的 fromisoformat 不认 Z
+        text = text[:-1] + "+00:00"
     try:
-        dt = datetime.fromisoformat(value.strip())
+        dt = datetime.fromisoformat(text)
     except ValueError:
         raise ValueError(f"not an ISO 8601 time: {value!r}") from None
     if dt.tzinfo is None:

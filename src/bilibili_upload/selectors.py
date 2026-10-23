@@ -73,6 +73,7 @@ SELECTORS: dict[str, Selector] = {
     "schedule_date_panel": Selector(".time-picker .date-picker-container", "定时发布区块内：日历面板"),
     "schedule_month_title": Selector(".time-picker .date-picker-nav-title", "日历面板：「2026年10月」"),
     "schedule_next_month": Selector(".time-picker .next-btn-month", "日历面板：下一个月"),
+    "schedule_prev_month": Selector(".time-picker .prev-btn-month", "日历面板：上一个月"),
     "schedule_day": Selector(".time-picker .date-wrp .date-item, .time-picker .date-wrp .date-item-selected",
                              "日历面板：可选的日期（不可选的是 date-item-disabled）"),
     "schedule_time": Selector(".time-picker .date-picker-timer", "定时发布区块内：时间下拉"),

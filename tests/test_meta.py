@@ -115,6 +115,9 @@ def test_schedule_parses_offset_and_converts_to_picker_time(write_meta):
                                  "schedule": "2026-10-23T16:00-07:00"}))
     assert picker_time(meta.schedule) == {"date": "2026-10-24", "time": "07:00", "tz": "UTC+08:00"}
     assert meta.to_json()["schedule"]["picker"]["date"] == "2026-10-24"
+    z = load_meta(write_meta({"video": "video.mp4", "title": "t", "creation_statement": "内容无需标注",
+                              "schedule": "2026-10-23T23:00Z"}))
+    assert picker_time(z.schedule)["time"] == "07:00"
 
 
 @pytest.mark.parametrize("value, needle", [

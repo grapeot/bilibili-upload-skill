@@ -13,7 +13,9 @@ pytestmark = pytest.mark.skipif(chrome is None, reason="system Chrome not found"
 
 HTML = """
 <html><body>
-<div class="time-container">
+<div class="bcc-dialog" style="display:none"><div class="time-container"><h3>定时发布</h3>
+  <div class="switch-container"></div></div></div>
+<div class="time-container" id="real">
   <div class="section-title-container"><h3>定时发布</h3></div>
   <div class="time-switch-wrp">
     <div class="switch-container" style="width:40px;height:20px;background:#ccc"><span class="switch-roll"></span></div>
@@ -22,7 +24,7 @@ HTML = """
       <input class="bcc-select-input-inner" readonly value="__TZ__">
       <div class="date-picker-date" style="width:120px;height:20px"><p class="date-show" id="d">__DATE__</p></div>
       <div class="date-picker-container" style="display:none">
-        <div><svg class="next-btn-month" width="20" height="20"></svg><p class="date-picker-nav-title" id="title"></p></div>
+        <div><svg class="prev-btn-month" width="20" height="20"></svg><svg class="next-btn-month" width="20" height="20"></svg><p class="date-picker-nav-title" id="title"></p></div>
         <div class="date-wrp" id="days"></div>
       </div>
       <div class="date-picker-timer" style="width:120px;height:20px"><p class="date-show" id="t">__TIME__</p></div>
@@ -35,10 +37,11 @@ HTML = """
 </div>
 <div class="submit-container"><span class="submit-add">立即投稿</span></div>
 <script>
-const $ = (s) => document.querySelector(s);
+const $ = (s) => document.querySelector('#real ' + s);
 const pad = (n) => String(n).padStart(2, '0');
-const start = $('#d').innerText.split('-').map(Number);  // 今天之前的日期不可选
-let ym = [start[0], start[1]];
+const start = '__TODAY__'.split('-').map(Number);  // 今天之前的日期不可选
+const shown0 = $('#d').innerText.split('-').map(Number);
+let ym = [shown0[0], shown0[1]];  // 日历打开时停在当前显示日期所在的月份
 $('.switch-container').onclick = () => {
   $('.switch-container').classList.toggle('switch-container-active');
   $('.time-picker').style.display = $('.switch-container').classList.contains('switch-container-active') ? '' : 'none';
@@ -62,6 +65,7 @@ $('.date-picker-date').onclick = () => {
   const p = $('.date-picker-container'); p.style.display = p.style.display === 'none' ? '' : 'none'; renderDays();
 };
 $('.next-btn-month').onclick = () => { ym = ym[1] === 12 ? [ym[0] + 1, 1] : [ym[0], ym[1] + 1]; renderDays(); };
+$('.prev-btn-month').onclick = () => { ym = ym[1] === 1 ? [ym[0] - 1, 12] : [ym[0], ym[1] - 1]; renderDays(); };
 const col = (id, values, pos) => {
   $(id).innerHTML = '';
   for (const v of values) {
@@ -101,10 +105,12 @@ def page():
         browser.close()
 
 
-def _load(page, tz=BEIJING_TZ):
+def _load(page, tz=BEIJING_TZ, shown_days=0):
+    """shown_days：选择器当前显示的日期比今天晚几天（模拟上一次运行选过别的日期）。"""
     now = datetime.now(timezone.utc).astimezone(PICKER_TZ) + timedelta(minutes=5)
-    page.set_content(HTML.replace("__TZ__", tz).replace("__DATE__", now.strftime("%Y-%m-%d"))
-                     .replace("__TIME__", now.strftime("%H:%M")))
+    shown = now + timedelta(days=shown_days)
+    page.set_content(HTML.replace("__TZ__", tz).replace("__TODAY__", now.strftime("%Y-%m-%d"))
+                     .replace("__DATE__", shown.strftime("%Y-%m-%d")).replace("__TIME__", now.strftime("%H:%M")))
 
 
 def _meta(tmp_path, when: datetime):
@@ -128,6 +134,13 @@ def test_schedule_sets_date_and_time(page, tmp_path, days):
     rb = readback(page, meta)
     assert rb["values"]["schedule"].startswith(local.strftime("%Y-%m-%d %H:%M (UTC+08:00)"))
     assert "schedule" not in rb["mismatches"]
+
+
+def test_schedule_goes_back_when_calendar_shows_a_later_month(page, tmp_path):
+    when = _target(1)
+    _load(page, shown_days=40)  # 日历停在一个多月之后
+    step_schedule(Form(page), _meta(tmp_path, when))
+    assert page.locator("#d").inner_text() == when.astimezone(PICKER_TZ).strftime("%Y-%m-%d")
 
 
 def test_schedule_refuses_other_time_zone(page, tmp_path):

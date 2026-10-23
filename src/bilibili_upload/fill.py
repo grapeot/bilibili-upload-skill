@@ -13,7 +13,7 @@ from typing import Any
 
 from .guard import focus_editable, safe_click, safe_fill, safe_insert_text, safe_press
 from .meta import UploadMeta, picker_time, schedule_window_problem
-from .plan import ALWAYS_HUMAN
+from .plan import ALWAYS_HUMAN, SCHEDULE_HUMAN_STEP
 from .selectors import BENIGN_DIALOG_TEXTS, OWN_DIALOG_TEXTS, SELECTORS, UPLOAD_URL, css
 
 COVER_SLOT_4X3 = "首页推荐封面（4:3）"
@@ -410,9 +410,10 @@ def step_subtitles(form: Form, meta: UploadMeta):
         if confirm.first.is_enabled():
             break
         form.page.wait_for_timeout(500)
+    pinned = dialog.element_handle()  # 固定这一个弹窗：内容切换后 :has() 选择器可能不再匹配，那不代表弹窗关了
     safe_click(confirm)
     try:  # 字幕上传完弹窗才关；关得慢时回读会误报没上传
-        dialog.wait_for(state="hidden", timeout=15000)
+        pinned.wait_for_element_state("hidden", timeout=15000)
     except Exception:  # noqa: BLE001
         form.warnings.append("subtitle dialog still open 15 s after 确认; check the subtitle section")
     if not meta.subtitles.default_on:
@@ -423,10 +424,17 @@ def _schedule_shown(box) -> list[str]:
     return [t.strip() for t in box.locator(css("schedule_shown")).all_inner_texts()]
 
 
+def _calendar_month(title: str) -> tuple[int, int] | None:
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", title or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
 def _close_panel(form: Form, box, panel: str, opener: str) -> None:
     if box.locator(css(panel)).filter(visible=True).count():
         safe_click(box.locator(css(opener)))
         form.page.wait_for_timeout(300)
+    if box.locator(css(panel)).filter(visible=True).count():  # 开着的面板会挡住后面的步骤
+        raise RuntimeError(f"{panel} did not close")
 
 
 def step_schedule(form: Form, meta: UploadMeta):
@@ -435,9 +443,12 @@ def step_schedule(form: Form, meta: UploadMeta):
     if problem:
         raise RuntimeError(problem)
     want = picker_time(meta.schedule)
-    if form.find("schedule_container") is None:
-        return False
     box = form.page.locator(css("schedule_container")).filter(visible=True).first
+    try:  # 批量操作弹窗里藏着一份同名区块，可能排在前面：只认可见的
+        box.wait_for(state="visible", timeout=5000)
+    except Exception:  # noqa: BLE001
+        form.mark_missing("schedule_container")
+        return False
     switch = box.locator(css("schedule_switch")).first
     if "switch-container-active" not in (switch.get_attribute("class") or ""):
         safe_click(switch)
@@ -451,14 +462,16 @@ def step_schedule(form: Form, meta: UploadMeta):
         safe_click(box.locator(css("schedule_date")))
         title = box.locator(css("schedule_month_title")).first
         title.wait_for(state="visible", timeout=5000)
-        month = want["date"][:4] + "年" + str(int(want["date"][5:7])) + "月"
-        for _ in range(2):  # 最多 15 天，跨不过两个月
-            if title.inner_text().strip() == month:
+        target = (int(want["date"][:4]), int(want["date"][5:7]))
+        for _ in range(3):  # 日历可能停在目标之前或之后的月份（上一次运行选过别的日期）
+            shown_month = _calendar_month(title.inner_text())
+            if shown_month == target:
                 break
-            safe_click(box.locator(css("schedule_next_month")))
+            go = "schedule_next_month" if shown_month is None or shown_month < target else "schedule_prev_month"
+            safe_click(box.locator(css(go)))
             form.page.wait_for_timeout(300)
-        if title.inner_text().strip() != month:
-            raise RuntimeError(f"calendar did not reach {month}")
+        if _calendar_month(title.inner_text()) != target:
+            raise RuntimeError(f"calendar did not reach {target[0]}年{target[1]}月")
         day = box.locator(css("schedule_day")).filter(has_text=_exact(str(int(want["date"][8:]))))
         if day.count() != 1:
             raise RuntimeError(f"day {want['date']} is not selectable in the calendar")
@@ -481,6 +494,7 @@ def step_schedule(form: Form, meta: UploadMeta):
     shown = _schedule_shown(box)
     if shown[:2] != [want["date"], want["time"]]:
         raise RuntimeError(f"schedule picker shows {shown}, expected {[want['date'], want['time']]}")
+    form.human.append(SCHEDULE_HUMAN_STEP)
 
 
 def chapters_text(meta: UploadMeta) -> str:
@@ -574,7 +588,7 @@ def wait_upload(page, timeout_s: float, form: Form | None = None, grace_s: float
             break
         page.wait_for_timeout(5000)
         st = upload_state(page)
-    st["timed_out"] = not st["done"] and not st["failed"]
+    st["timed_out"] = not st["done"] and not st["failed"] and not st["stalled"]
     return st
 
 
@@ -738,6 +752,10 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
 
     from .browser import check_login, connect, verify_own_browser
 
+    if meta.schedule:  # 在选文件之前拒绝已经不合规的定时，免得白白开始上传
+        problem = schedule_window_problem(meta.schedule, datetime.now(timezone.utc))
+        if problem:
+            return {"ok": False, "error": problem, "next": "fix schedule in the metadata and run again"}
     own = verify_own_browser(session)
     if not own["ok"]:
         return own
@@ -761,7 +779,7 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
             page = ctx.new_page()
             form = Form(page)
             try:
-                page.goto(UPLOAD_URL, wait_until="load")
+                page.goto(UPLOAD_URL, wait_until="domcontentloaded")
                 login = check_login(page)
                 if login.get("logged_in") is not True:  # 保留这个标签页，人可以在里面扫码登录
                     return {"ok": False, "error": "not logged in; ask the human to log in (QR scan) in the opened tab",
