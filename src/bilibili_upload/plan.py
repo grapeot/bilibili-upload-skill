@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .meta import UploadMeta
+from .meta import UploadMeta, picker_time
+
+# B 站在点「立即投稿」时才校验定时时间，填表时合规不代表提交时还合规
+SCHEDULE_HUMAN_STEP = "点「立即投稿」时定时时间须仍在当前之后至少 5 分钟；等太久就先在页面上改时间"
 
 # 永远留给人的步骤
 ALWAYS_HUMAN = [
@@ -44,6 +47,9 @@ def build_plan(meta: UploadMeta, reuse_tab: bool = False) -> dict[str, Any]:
         add("chapters", [{"time": c.timestamp, "title": c.title} for c in meta.chapters])
     if meta.dynamic:
         add("dynamic", {"chars": len(meta.dynamic)})
+    if meta.schedule:
+        add("schedule", {"at": meta.schedule.isoformat(), "picker": picker_time(meta.schedule),
+                         "note": "打开定时发布，按选择器默认的北京时间选日期和时间；时间须在执行时之后 5 分钟到 15 天内"})
     add("dismiss_dialogs", "每一步前用 x 关闭已知无害弹窗（如上传完成通知），其他弹窗按文字报告")
     add("wait_upload", "等待视频上传与处理")
     add("readback", "逐项读回并与元数据比对")
@@ -52,4 +58,6 @@ def build_plan(meta: UploadMeta, reuse_tab: bool = False) -> dict[str, Any]:
     human = list(ALWAYS_HUMAN)
     if meta.subtitles and not meta.subtitles.default_on:
         human.insert(0, "表单里没有字幕默认开关；如需确认字幕对观众默认关闭，投稿后在字幕管理或播放页检查")
+    if meta.schedule:
+        human.insert(0, SCHEDULE_HUMAN_STEP)
     return {"steps": steps, "human_steps": human, "meta": meta.to_json()}

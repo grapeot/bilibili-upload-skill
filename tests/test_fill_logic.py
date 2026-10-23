@@ -1,7 +1,8 @@
+import pytest
 from pathlib import Path
 
 from bilibili_upload.browser import browser_matches
-from bilibili_upload.fill import classify_upload, compare, tab_matches_video
+from bilibili_upload.fill import classify_upload, compare, subtitle_chooser_ok, tab_matches_video
 from bilibili_upload.meta import parse_meta
 
 
@@ -80,3 +81,34 @@ def test_tab_matches_video():
     assert not tab_matches_video("", "", v, "我的标题")
     assert not tab_matches_video("intro_my_video_v4.mp4 上传中", None, v)  # 不做子串匹配
     assert not tab_matches_video("data.mp4", None, Path("/x/a.mp4"))
+
+
+@pytest.mark.parametrize("inside, detached, accept, name, ok", [
+    (True, False, ".srt", "", True),
+    (True, False, "", "", True),
+    (False, True, ".srt", "", True),          # 点击时临时创建、不挂到文档里的字幕输入框
+    (False, True, "", "", False),             # 游离且没声明 .srt：不认
+    (False, False, ".srt", "", False),        # 挂在文档里但不在弹窗内
+    (True, False, ".mp4,.flv", "", False),
+    (False, True, ".srt", "buploader", False),
+])
+def test_subtitle_chooser_ok(inside, detached, accept, name, ok):
+    assert subtitle_chooser_ok(inside, detached, accept, name) is ok
+
+
+def test_classify_upload_stalled_at_zero_total():
+    stuck = classify_upload(1, "film 上传中... 已经上传：0.0MB/0.0MB 当前速度：0.0MB/s 剩余时间：>1天 0%")
+    assert stuck["stalled"] is True and stuck["done"] is False
+    starting = classify_upload(1, "film 上传中... 已经上传：0.0MB/70.7MB 当前速度：0.0MB/s 0%")
+    assert starting["stalled"] is False
+    assert classify_upload(1, "film 上传完成")["stalled"] is False
+
+
+def test_compare_schedule(tmp_path):
+    meta = _meta(tmp_path, schedule="2026-10-23T16:00-07:00")
+    base = {"title": "标题", "creation_statement": "内容无需标注", "visibility": "公开可见"}
+    ok = {**base, "schedule": "2026-10-24 07:00 (UTC+08:00) Beijing, Chongqing, Hong Kong SAR, Urumqi"}
+    assert compare(ok, meta)[0] == {}
+    assert "schedule" in compare({**base, "schedule": "off"}, meta)[0]
+    assert "schedule" in compare({**base, "schedule": "2026-10-24 07:05 (UTC+08:00) Beijing"}, meta)[0]
+    assert compare(base, _meta(tmp_path))[0] == {}  # 没有定时：不读这一项

@@ -59,6 +59,15 @@ const isEditable = (e) => {
   if (tag === 'textarea') return true;
   return tag === 'input' && TEXT_INPUTS.includes((e.type || '').toLowerCase());
 };
+// <button> 没写 type 时浏览器报 'submit'，但只有它属于某个表单时才真能提交表单。
+// B 站很多普通按钮（上传字幕、编辑章节）都不写 type，也不在表单里，按写明的属性算。
+const typeOf = (e) => {
+  if (e.tagName === 'INPUT') return (e.type || '').toLowerCase();
+  if (e.tagName !== 'BUTTON') return '';
+  // 写了 type 就用浏览器规范化后的值（写错的值也会被当成 submit）
+  if (e.hasAttribute('type')) return (e.type || '').toLowerCase();
+  return e.form ? 'submit' : '';
+};
 const interactive = (e) => e.closest ? e.closest('button, a, [role=button], label, input[type=submit], input[type=button]') : null;
 const describe = (e) => {
   if (!e) return null;
@@ -69,7 +78,7 @@ const describe = (e) => {
     text: isEditable(e) ? '' : ((e.innerText || '') + ' ' + (e.tagName === 'INPUT' ? (e.value || '') : '')),
     aria: (e.getAttribute && (e.getAttribute('aria-label') || '')) || '',
     cls: clsOf(e),
-    type: ((e.tagName === 'BUTTON' || e.tagName === 'INPUT') ? (e.type || '') : '').toLowerCase(),
+    type: typeOf(e),
     ancestorClasses: ancestors,
   };
 };

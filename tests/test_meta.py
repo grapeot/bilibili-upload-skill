@@ -106,3 +106,41 @@ def test_cover_4x3_optional(write_meta, good_meta, media):
     good_meta["cover_4x3"] = "cover43.png"
     meta = load_meta(write_meta(good_meta))
     assert meta.cover_4x3.name == "cover43.png" and meta.cover.name == "cover.jpg"
+
+
+def test_schedule_parses_offset_and_converts_to_picker_time(write_meta):
+    from bilibili_upload.meta import picker_time
+
+    meta = load_meta(write_meta({"video": "video.mp4", "title": "t", "creation_statement": "内容无需标注",
+                                 "schedule": "2026-10-23T16:00-07:00"}))
+    assert picker_time(meta.schedule) == {"date": "2026-10-24", "time": "07:00", "tz": "UTC+08:00"}
+    assert meta.to_json()["schedule"]["picker"]["date"] == "2026-10-24"
+    z = load_meta(write_meta({"video": "video.mp4", "title": "t", "creation_statement": "内容无需标注",
+                              "schedule": "2026-10-23T23:00Z"}))
+    assert picker_time(z.schedule)["time"] == "07:00"
+
+
+@pytest.mark.parametrize("value, needle", [
+    ("2026-10-23T16:00", "no UTC offset"),
+    ("2026-10-23T16:03-07:00", "steps of 5"),
+    ("2026-10-23T16:00:30-07:00", "steps of 5"),
+    ("tomorrow 4pm", "not an ISO 8601"),
+    (1700000000, "ISO 8601"),
+])
+def test_schedule_rejects_bad_values(write_meta, value, needle):
+    with pytest.raises(MetaError) as ei:
+        load_meta(write_meta({"video": "video.mp4", "title": "t", "creation_statement": "内容无需标注",
+                              "schedule": value}))
+    assert needle in str(ei.value)
+
+
+def test_schedule_window():
+    from datetime import datetime, timedelta, timezone
+
+    from bilibili_upload.meta import schedule_window_problem
+
+    now = datetime(2026, 10, 23, 17, 0, tzinfo=timezone.utc)
+    assert schedule_window_problem(now + timedelta(minutes=5), now) is None
+    assert schedule_window_problem(now + timedelta(days=15), now) is None
+    assert "less than 5 minutes" in schedule_window_problem(now + timedelta(minutes=4), now)
+    assert "more than 15 days" in schedule_window_problem(now + timedelta(days=15, minutes=5), now)

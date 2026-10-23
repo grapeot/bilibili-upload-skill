@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from .guard import focus_editable, safe_click, safe_fill, safe_insert_text, safe_press
-from .meta import UploadMeta
-from .plan import ALWAYS_HUMAN
+from .meta import UploadMeta, picker_time, schedule_window_problem
+from .plan import ALWAYS_HUMAN, SCHEDULE_HUMAN_STEP
 from .selectors import BENIGN_DIALOG_TEXTS, OWN_DIALOG_TEXTS, SELECTORS, UPLOAD_URL, css
 
 COVER_SLOT_4X3 = "首页推荐封面（4:3）"
@@ -138,6 +139,16 @@ def _norm_text(s: str | None) -> str:
 
 def _exact(text: str) -> re.Pattern:
     return re.compile(rf"^\s*{re.escape(text)}\s*$")
+
+
+def wait_page_settled(page, idle_ms: float = 15000, extra_ms: float = 2000) -> None:
+    """等上传组件加载完再选文件。太早选文件时组件报错
+    (Cannot read properties of undefined (reading 'upload'))，条目停在 0.0MB/0.0MB 永远不动。"""
+    try:
+        page.wait_for_load_state("networkidle", timeout=idle_ms)
+    except Exception:  # noqa: BLE001 - 页面有长连接时等不到 networkidle，退回固定等待
+        pass
+    page.wait_for_timeout(extra_ms)
 
 
 def select_file_via_chooser(page, click_locator, path, accept_hint: str, timeout_ms: float = 15000) -> None:
@@ -344,14 +355,24 @@ def step_dynamic(form: Form, meta: UploadMeta):
     _clear_and_type_quill(form.page, form.page.locator(css("dynamic_editor")), meta.dynamic)
 
 
+def subtitle_chooser_ok(inside_dialog: bool, detached: bool, accept: str, name: str) -> bool:
+    """纯函数：字幕弹窗弹出的文件选择框是不是字幕输入框，而不是视频上传器。"""
+    if name == "buploader":
+        return False
+    if inside_dialog:
+        return not accept or ".srt" in accept
+    return detached and ".srt" in accept
+
+
 def step_subtitles(form: Form, meta: UploadMeta):
     if not expand_more_settings(form):
         return False
-    btn = form.find("subtitle_button")
-    if btn is None:
-        return False
-    safe_click(btn)
     dialog = form.page.locator(css("subtitle_dialog")).filter(visible=True).first
+    if not dialog.count():  # 上一次运行留下的弹窗还开着时直接接着用
+        btn = form.find("subtitle_button")
+        if btn is None:
+            return False
+        safe_click(btn)
     try:
         dialog.wait_for(state="visible", timeout=10000)
     except Exception:  # noqa: BLE001
@@ -374,8 +395,11 @@ def step_subtitles(form: Form, meta: UploadMeta):
     accept = (chooser.element.get_attribute("accept") or "").lower()
     name = chooser.element.get_attribute("name") or ""
     inside = chooser.element.evaluate("(el, d) => d.contains(el)", dialog.element_handle())
-    if not inside or name == "buploader" or (accept and ".srt" not in accept):
-        raise RuntimeError(f"file chooser is not the subtitle input (inside_dialog={inside}, accept={accept!r}, name={name!r})")
+    # 现在的页面点「上传文件」时临时创建一个不挂到文档里的 input；这种游离的输入框只在明确接受 .srt 时放行
+    detached = chooser.element.evaluate("(el) => !el.isConnected")
+    if not subtitle_chooser_ok(inside, detached, accept, name):
+        raise RuntimeError(f"file chooser is not the subtitle input (inside_dialog={inside}, detached={detached}, "
+                           f"accept={accept!r}, name={name!r})")
     chooser.set_files(str(meta.subtitles.path))  # 字幕是小文件
     confirm = dialog.locator(css("subtitle_confirm")).filter(has_text="确认")
     if not confirm.count():
@@ -386,10 +410,91 @@ def step_subtitles(form: Form, meta: UploadMeta):
         if confirm.first.is_enabled():
             break
         form.page.wait_for_timeout(500)
+    pinned = dialog.element_handle()  # 固定这一个弹窗：内容切换后 :has() 选择器可能不再匹配，那不代表弹窗关了
     safe_click(confirm)
-    form.page.wait_for_timeout(1500)
+    try:  # 字幕上传完弹窗才关；关得慢时回读会误报没上传
+        pinned.wait_for_element_state("hidden", timeout=15000)
+    except Exception:  # noqa: BLE001
+        form.warnings.append("subtitle dialog still open 15 s after 确认; check the subtitle section")
     if not meta.subtitles.default_on:
         form.human.append("表单里没有字幕「对观众默认开启/关闭」的设置；如需确认，投稿后去字幕管理或播放页检查")
+
+
+def _schedule_shown(box) -> list[str]:
+    return [t.strip() for t in box.locator(css("schedule_shown")).all_inner_texts()]
+
+
+def _calendar_month(title: str) -> tuple[int, int] | None:
+    m = re.search(r"(\d{4})\s*年\s*(\d{1,2})\s*月", title or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _close_panel(form: Form, box, panel: str, opener: str) -> None:
+    if box.locator(css(panel)).filter(visible=True).count():
+        safe_click(box.locator(css(opener)))
+        form.page.wait_for_timeout(300)
+    if box.locator(css(panel)).filter(visible=True).count():  # 开着的面板会挡住后面的步骤
+        raise RuntimeError(f"{panel} did not close")
+
+
+def step_schedule(form: Form, meta: UploadMeta):
+    """打开「定时发布」并选好日期、时间。只在选择器显示北京时间（默认）时操作，不改时区。"""
+    problem = schedule_window_problem(meta.schedule, datetime.now(timezone.utc))
+    if problem:
+        raise RuntimeError(problem)
+    want = picker_time(meta.schedule)
+    box = form.page.locator(css("schedule_container")).filter(visible=True).first
+    try:  # 批量操作弹窗里藏着一份同名区块，可能排在前面：只认可见的
+        box.wait_for(state="visible", timeout=5000)
+    except Exception:  # noqa: BLE001
+        form.mark_missing("schedule_container")
+        return False
+    switch = box.locator(css("schedule_switch")).first
+    if "switch-container-active" not in (switch.get_attribute("class") or ""):
+        safe_click(switch)
+    if form.find("schedule_timezone", timeout=5000, root=box) is None:
+        return False
+    tz = box.locator(css("schedule_timezone")).first.input_value()
+    if not tz.startswith("(UTC+08:00)"):
+        raise RuntimeError(f"schedule picker time zone is {tz!r}; this tool only sets times while it shows (UTC+08:00)")
+
+    if _schedule_shown(box)[:1] != [want["date"]]:
+        safe_click(box.locator(css("schedule_date")))
+        title = box.locator(css("schedule_month_title")).first
+        title.wait_for(state="visible", timeout=5000)
+        target = (int(want["date"][:4]), int(want["date"][5:7]))
+        for _ in range(3):  # 日历可能停在目标之前或之后的月份（上一次运行选过别的日期）
+            shown_month = _calendar_month(title.inner_text())
+            if shown_month == target:
+                break
+            go = "schedule_next_month" if shown_month is None or shown_month < target else "schedule_prev_month"
+            safe_click(box.locator(css(go)))
+            form.page.wait_for_timeout(300)
+        if _calendar_month(title.inner_text()) != target:
+            raise RuntimeError(f"calendar did not reach {target[0]}年{target[1]}月")
+        day = box.locator(css("schedule_day")).filter(has_text=_exact(str(int(want["date"][8:]))))
+        if day.count() != 1:
+            raise RuntimeError(f"day {want['date']} is not selectable in the calendar")
+        safe_click(day)
+        form.page.wait_for_timeout(500)
+        _close_panel(form, box, "schedule_date_panel", "schedule_date")
+
+    if _schedule_shown(box)[1:2] != [want["time"]]:
+        safe_click(box.locator(css("schedule_time")))
+        cols = box.locator(css("schedule_column"))
+        cols.first.wait_for(state="visible", timeout=5000)
+        for i, value in enumerate(want["time"].split(":")):  # 先小时后分钟：分钟是否可选取决于小时
+            item = cols.nth(i).locator(css("schedule_column_item")).filter(has_text=_exact(value))
+            if item.count() != 1 or "disabled" in (item.first.get_attribute("class") or ""):
+                raise RuntimeError(f"{'hour' if i == 0 else 'minute'} {value} is not selectable")
+            safe_click(item)
+            form.page.wait_for_timeout(300)
+        _close_panel(form, box, "schedule_time_panel", "schedule_time")
+
+    shown = _schedule_shown(box)
+    if shown[:2] != [want["date"], want["time"]]:
+        raise RuntimeError(f"schedule picker shows {shown}, expected {[want['date'], want['time']]}")
+    form.human.append(SCHEDULE_HUMAN_STEP)
 
 
 def chapters_text(meta: UploadMeta) -> str:
@@ -445,6 +550,7 @@ _UPLOAD_JS = """(sel) => {
   return {items: items.length, text};
 }"""
 
+_ZERO_TOTAL = re.compile(r"/\s*0(?:\.0+)?\s*MB")
 _IN_PROGRESS = re.compile(r"上传中|处理中|转码中|(?<![\d.])(?:\d|[1-9]\d)(?:\.\d+)?%")
 
 
@@ -453,7 +559,10 @@ def classify_upload(items: int, text: str) -> dict[str, Any]:
     failed = bool(re.search(r"失败|错误", text))
     in_progress = bool(_IN_PROGRESS.search(text))
     done = items > 0 and not failed and not in_progress and bool(re.search(r"上传完成|已完成|处理完成|100(?:\.0+)?%", text))
-    return {"items": items, "text": text, "done": done, "failed": failed, "in_progress": in_progress}
+    # 文件总大小显示为 0：上传组件没接住文件（常见于页面还没加载完就选了文件），会一直停在 0%
+    stalled = not done and bool(_ZERO_TOTAL.search(text))
+    return {"items": items, "text": text, "done": done, "failed": failed, "in_progress": in_progress,
+            "stalled": stalled}
 
 
 def upload_state(page, full_text: bool = False) -> dict[str, Any]:
@@ -472,9 +581,14 @@ def wait_upload(page, timeout_s: float, form: Form | None = None, grace_s: float
             if form is not None:
                 form.mark_missing("upload_item")
             break
+        if st["stalled"] and time.monotonic() - start > grace_s:
+            if form is not None:
+                form.warnings.append("upload stalled at 0.0MB/0.0MB: the upload widget did not take the file; "
+                                     "ask the human before closing this tab, then select the video again in a fully loaded page")
+            break
         page.wait_for_timeout(5000)
         st = upload_state(page)
-    st["timed_out"] = not st["done"] and not st["failed"]
+    st["timed_out"] = not st["done"] and not st["failed"] and not st["stalled"]
     return st
 
 
@@ -498,6 +612,15 @@ _READ_JS = """(s) => {
     dynamic: txt(s.dynamic_editor),
     subtitles_section: txt(s.subtitle_section),
     chapters_section: txtWith(s.chapter_section, '章节管理'),
+    schedule: (() => {
+      const box = Array.from(document.querySelectorAll(s.schedule_container)).find(e => e.getClientRects().length);
+      if (!box) return null;
+      const sw = box.querySelector(s.schedule_switch);
+      if (!sw || !sw.className.includes('switch-container-active')) return 'off';
+      const tz = box.querySelector(s.schedule_timezone);
+      const shown = Array.from(box.querySelectorAll(s.schedule_shown)).map(e => e.innerText.trim());
+      return shown.join(' ') + ' ' + (tz ? tz.value : '');
+    })(),
   };
 }"""
 
@@ -506,6 +629,7 @@ _READ_SELECTORS = {
     "title": "title", "creation_statement": "statement_input", "partition": "partition_value",
     "tags": "tag_input", "description": "desc_editor", "visibility": "visibility_checked",
     "dynamic": "dynamic_editor", "subtitles_section": "subtitle_section", "chapters_section": "chapter_section",
+    "schedule": "schedule_container",
 }
 
 
@@ -520,7 +644,8 @@ def compare(got: dict[str, Any], meta: UploadMeta) -> tuple[dict[str, Any], list
     wanted = {"title", "creation_statement", "visibility"}
     wanted |= {k for k, on in (("partition", meta.partition), ("tags", meta.tags),
                                ("description", meta.description), ("dynamic", meta.dynamic),
-                               ("subtitles_section", meta.subtitles), ("chapters_section", meta.chapters)) if on}
+                               ("subtitles_section", meta.subtitles), ("chapters_section", meta.chapters),
+                               ("schedule", meta.schedule)) if on}
 
     def cmp(key: str, ok: bool, expected: Any) -> None:
         if got.get(key) is None:
@@ -553,6 +678,10 @@ def compare(got: dict[str, Any], meta: UploadMeta) -> tuple[dict[str, Any], list
             cmp(key, "已上传" in (v or "") and lang in (v or ""), f"已上传【{lang}】字幕")
         elif key == "chapters_section":
             cmp(key, "已配置章节" in (v or ""), "已配置章节")
+        elif key == "schedule":
+            w = picker_time(meta.schedule)
+            expected = f"{w['date']} {w['time']} (UTC+08:00)"
+            cmp(key, (v or "").startswith(expected), expected)
     return mismatches, sorted(set(missing))
 
 
@@ -623,6 +752,10 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
 
     from .browser import check_login, connect, verify_own_browser
 
+    if meta.schedule:  # 在选文件之前拒绝已经不合规的定时，免得白白开始上传
+        problem = schedule_window_problem(meta.schedule, datetime.now(timezone.utc))
+        if problem:
+            return {"ok": False, "error": problem, "next": "fix schedule in the metadata and run again"}
     own = verify_own_browser(session)
     if not own["ok"]:
         return own
@@ -654,6 +787,7 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
                 if form.find("upload_area", timeout=20000) is None:
                     page.close()
                     return {"ok": False, "error": "upload area not found", "missing_selectors": form.missing}
+                wait_page_settled(page)
                 select_file_via_chooser(page, page.locator(css("upload_area")), meta.video, ".mp4")  # 上传从这里开始
             except Exception as e:  # noqa: BLE001 - 文件没选上：关掉自己开的标签页，不留空页
                 try:
@@ -684,6 +818,8 @@ def execute(session, meta: UploadMeta, reuse_tab: bool, upload_timeout_s: float,
             form.run("visibility", lambda: step_visibility(form, meta))
             if meta.dynamic:
                 form.run("dynamic", lambda: step_dynamic(form, meta))
+            if meta.schedule:
+                form.run("schedule", lambda: step_schedule(form, meta))
             if meta.subtitles:
                 form.run("subtitles", lambda: step_subtitles(form, meta))
             upload = wait_upload(page, upload_timeout_s if wait_for_upload else 0, form)

@@ -64,6 +64,22 @@ SELECTORS: dict[str, Selector] = {
     "subtitle_file_button": Selector("button.modal-content-upload-button", "字幕弹窗内：选择字幕文件"),
     "subtitle_confirm": Selector("button.modal-footer-button", "字幕弹窗内：「确认」（选好文件后才可用）"),
     "dynamic_editor": Selector(".fans-input-wrp .ql-editor", "粉丝动态编辑器"),
+    # 定时发布（批量操作弹窗里还有一份同名区块，取可见的那个）
+    "schedule_container": Selector(".time-container", "定时发布区块"),
+    "schedule_switch": Selector(".switch-container", "定时发布区块内：开关（打开后多一个 -active 类）"),
+    "schedule_timezone": Selector(".time-picker .bcc-select-input-inner", "定时发布区块内：时区（默认北京时间）"),
+    "schedule_shown": Selector(".time-picker .date-show", "定时发布区块内：当前显示的日期、时间"),
+    "schedule_date": Selector(".time-picker .date-picker-date", "定时发布区块内：日期下拉"),
+    "schedule_date_panel": Selector(".time-picker .date-picker-container", "定时发布区块内：日历面板"),
+    "schedule_month_title": Selector(".time-picker .date-picker-nav-title", "日历面板：「2026年10月」"),
+    "schedule_next_month": Selector(".time-picker .next-btn-month", "日历面板：下一个月"),
+    "schedule_prev_month": Selector(".time-picker .prev-btn-month", "日历面板：上一个月"),
+    "schedule_day": Selector(".time-picker .date-wrp .date-item, .time-picker .date-wrp .date-item-selected",
+                             "日历面板：可选的日期（不可选的是 date-item-disabled）"),
+    "schedule_time": Selector(".time-picker .date-picker-timer", "定时发布区块内：时间下拉"),
+    "schedule_time_panel": Selector(".time-picker .time-picker-container", "定时发布区块内：时间面板"),
+    "schedule_column": Selector(".time-picker .time-picker-panel-select-wrp", "时间面板：小时列、分钟列"),
+    "schedule_column_item": Selector(".time-picker-panel-select-item", "时间面板：一个小时或分钟（不可选的带 time-select-disabled）"),
     # 提交区：页面底部同时有「存草稿」和「立即投稿」，只用来定位和滚动，永不点击
     "submit": Selector(".submit-container .submit-add", "「立即投稿」按钮（只定位，不点击）"),
 }
