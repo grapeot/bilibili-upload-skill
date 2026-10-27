@@ -224,6 +224,9 @@ def step_cover(form: Form, meta: UploadMeta):
     cover = form.find("cover")
     if cover is None:
         return False
+    if form.page.locator(css("cover_disabled")).count():
+        raise RuntimeError("cover slot is disabled (B站 may still be processing the video); "
+                           "retry with --reuse-tab after the upload finishes")
     safe_click(cover)
     dialog = _dialog_with(form.page, "封面制作")
     if dialog is None:
