@@ -5,7 +5,9 @@
 - 元素自身、它最近的可交互祖先（button / a / [role=button] / label）的文字、aria、type；
 - 元素到文档根的所有祖先（穿过 shadow root）的类名；
 - 元素内部是否包含提交类元素；
-- 元素中心点实际命中的元素（elementFromPoint）及其可交互祖先；
+- 点击点实际命中的元素（elementFromPoint）及其可交互祖先。点击点默认是元素中心；中心被别的元素
+  盖住时（例如上传中「立即投稿」上方的提示气泡盖住了「更多设置」），改在元素上找一个确实命中它
+  自己（或其后代）的点，检查和点击都用这同一个点；找不到就仍按中心检查，命中的遮挡物照常被拒；
 - 元素和命中元素的所有祖先里，是否有文字很短或可点击、且文字含禁词的元素（div/span 拼成的按钮；
   包含输入框或可编辑区域的祖先跳过，真正的按钮不会包含输入框）；
 - 若在 <label> 里，label 关联的控件（元素和命中元素都查）。
@@ -91,7 +93,7 @@ const containsSubmit = (e) => {
 };
 """
 
-_INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
+_INSPECT_CLICK_JS = "(el, pos) => {" + _COMMON_JS + r"""
   EXC_EL = matchException(el);
   // 祖先里任何「短文字含禁词」或「可点击且文字含禁词」的元素都视为提交按钮（div/span 拼成的按钮）
   const EDITABLE_CSS = 'input:not([type]), input[type=text], input[type=search], input[type=email], input[type=url], ' +
@@ -123,7 +125,9 @@ _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
     if (containsSubmit(ctl)) out.containsSubmit = true;
   }
   const r = el.getBoundingClientRect();
-  const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  // pos 是相对元素左上角的点击点（与 Playwright click(position=...) 一致）；没有就用中心
+  const px = r.left + (pos ? pos.x : r.width / 2), py = r.top + (pos ? pos.y : r.height / 2);
+  const hit = document.elementFromPoint(px, py);
   if (hit && hit !== el) {
     out.hit = describe(hit);
     const hi = interactive(hit);
@@ -137,6 +141,21 @@ _INSPECT_CLICK_JS = "(el) => {" + _COMMON_JS + r"""
   }
   out.exception = !!EXC_EL;
   return out;
+}"""
+
+# 中心被别的元素盖住时，在元素上找一个命中它自己（或后代）的点；返回相对左上角的偏移，
+# 中心本来就命中或整个元素都被盖住时返回 null（按中心检查，遮挡物照常被拒）
+_PICK_POINT_JS = r"""(el) => {
+  const r = el.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  const own = (x, y) => { const h = document.elementFromPoint(x, y); return !!h && (h === el || el.contains(h)); };
+  if (own(r.left + r.width / 2, r.top + r.height / 2)) return null;
+  const fr = [0.5, 0.25, 0.75, 0.1, 0.9];
+  for (const fy of fr) for (const fx of fr) {
+    const x = Math.min(Math.max(r.width * fx, 1), r.width - 1), y = Math.min(Math.max(r.height * fy, 1), r.height - 1);
+    if (own(r.left + x, r.top + y)) return {x, y};
+  }
+  return null;
 }"""
 
 _INSPECT_FOCUS_JS = "(el) => {" + _COMMON_JS + r"""
@@ -158,6 +177,7 @@ def _js(template: str) -> str:
 
 INSPECT_CLICK_JS = _js(_INSPECT_CLICK_JS)
 INSPECT_FOCUS_JS = _js(_INSPECT_FOCUS_JS)
+PICK_POINT_JS = _PICK_POINT_JS
 
 
 class ForbiddenClick(RuntimeError):
@@ -222,8 +242,9 @@ def _pin(locator, timeout: float):
     return handle
 
 
-def check_click(handle) -> dict[str, Any]:
-    report = handle.evaluate(INSPECT_CLICK_JS)
+def check_click(handle, pos: dict[str, float] | None = None) -> dict[str, Any]:
+    """检查在 pos（相对元素左上角；None 为中心）点击这个元素是否安全。"""
+    report = handle.evaluate(INSPECT_CLICK_JS, pos)
     reason = click_verdict(report)
     if reason:
         text = ((report.get("self") or {}).get("text") or "").strip()[:40]
@@ -231,12 +252,20 @@ def check_click(handle) -> dict[str, Any]:
     return report
 
 
-def safe_click(locator, timeout: float = 5000) -> None:
-    """唯一允许的点击入口：固定元素、检查、对同一个元素点击。"""
-    handle = _pin(locator, timeout)
+def _checked_click(handle, timeout: float) -> None:
+    """对固定好的元素：选点击点、在这个点上检查、在同一个点上点击。"""
     handle.scroll_into_view_if_needed(timeout=timeout)
-    check_click(handle)
-    handle.click(timeout=timeout)
+    pos = handle.evaluate(PICK_POINT_JS)
+    check_click(handle, pos)
+    if pos:
+        handle.click(timeout=timeout, position=pos)
+    else:
+        handle.click(timeout=timeout)
+
+
+def safe_click(locator, timeout: float = 5000) -> None:
+    """唯一允许的点击入口：固定元素、检查、对同一个元素的同一个点点击。"""
+    _checked_click(_pin(locator, timeout), timeout)
 
 
 def _check_focus(handle, enter: bool = False) -> None:
@@ -248,9 +277,7 @@ def _check_focus(handle, enter: bool = False) -> None:
 def focus_editable(locator, timeout: float = 5000):
     """点击一个可编辑元素使其获得焦点，返回固定后的句柄供后续按键使用。"""
     handle = _pin(locator, timeout)
-    handle.scroll_into_view_if_needed(timeout=timeout)
-    check_click(handle)
-    handle.click(timeout=timeout)
+    _checked_click(handle, timeout)
     _check_focus(handle)
     return handle
 

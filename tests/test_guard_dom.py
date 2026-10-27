@@ -159,3 +159,82 @@ def test_dismiss_dialogs_closes_benign_and_reports_unknown(page):
     assert pg.evaluate("window.ack") is None and pg.evaluate("window.closedMystery") is None
     assert any("账号异常提醒" in t for t in form.unknown_dialogs)
     ctx.close()
+
+
+# 真实页面的形状（2026-10）：上传进行中，「立即投稿」上方弹出提示气泡 .submit-auto-tips，
+# 气泡是 .submit-container 的后代、宽 300px，正好盖住上方「更多设置」开关的中心，但盖不住开关左段。
+# 气泡不是开关的祖先；守卫按中心命中检查时命中的是提交区里的气泡，所以拒绝。
+SUBMIT_TIP_HTML = """
+<html><body style="margin:8px;font-size:14px">
+<div class="form" style="width:900px">
+  <div class="form-item"><div class="cover"><div class="cover-content"><div class="cover-main">
+    <div class="cover-module cover-module-main"><div class="cover-slot" id="slot">
+      <div class="cover-empty" id="coverempty" style="width:160px;height:90px" onclick="window.coverClicked=1">
+        <div class="cover-empty-pill"><span class="add-text">添加封面</span></div></div></div></div>
+    <div class="cover-module cover-module-pk"><div class="cover-slot"><div class="cover-img" style="width:160px;height:90px"></div></div></div>
+  </div></div></div></div>
+  <div class="title" style="margin-top:20px">
+    <span class="label" id="more" style="cursor:pointer;display:inline-block;width:360px"
+          onclick="window.moreClicked=(window.moreClicked||0)+1">更多设置 <span class="des">（含声明与权益、视频元素、互动管理等）</span></span></div>
+  <div class="form-item"><div class="submit-container" style="position:relative;padding:10px 0">
+    <span class="submit-draft" onclick="window.drafted=1">存草稿</span>
+    <div class="submit-actions"><span class="submit-button-anchor" style="position:relative;display:inline-block;margin-left:200px">
+      <span class="submit-add" style="display:inline-block;width:120px;height:40px" onclick="window.submitted=1">立即投稿</span>
+      <div class="v-popover submit-auto-tips" id="tip" onclick="window.tipClicked=1"
+           style="position:absolute;top:0;left:50%;width:300px;padding:16px 24px;cursor:pointer;background:#00aeec;
+                  transform:translate(-50%,calc(-100% - 16px));z-index:100">信息填完后，就可投稿！不需等待上传完成哦~</div>
+    </span></div>
+  </div></div>
+</div></body></html>
+"""
+
+CENTER_HIT_JS = """(sel) => { const e = document.querySelector(sel); const r = e.getBoundingClientRect();
+  const h = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return h ? h.id || h.className : null; }"""
+
+
+@pytest.fixture
+def tip_page(page):
+    ctx = page.context.browser.new_context()
+    pg = ctx.new_page()
+    pg.set_content(SUBMIT_TIP_HTML)
+    yield pg
+    ctx.close()
+
+
+def _flags(pg):
+    return pg.evaluate("[window.moreClicked, window.tipClicked, window.submitted, window.drafted]")
+
+
+def test_toggle_under_submit_tip_is_clicked_on_its_uncovered_part(tip_page):
+    assert tip_page.evaluate(CENTER_HIT_JS, "#more") == "tip"  # 前提：开关中心被提交区的气泡盖住
+    safe_click(tip_page.locator("#more"))
+    assert _flags(tip_page) == [1, None, None, None]
+
+
+def test_toggle_fully_covered_by_submit_tip_is_refused(tip_page):
+    tip_page.evaluate("document.querySelector('#tip').style.width = '1200px'")  # 气泡盖住整个开关
+    with pytest.raises(ForbiddenClick):
+        safe_click(tip_page.locator("#more"))
+    assert _flags(tip_page) == [None, None, None, None]
+
+
+@pytest.mark.parametrize("sel", ["#tip", ".submit-add", ".submit-draft"])
+def test_submit_area_and_its_tip_are_refused(tip_page, sel):
+    with pytest.raises(ForbiddenClick):
+        safe_click(tip_page.locator(sel))
+    assert _flags(tip_page) == [None, None, None, None]
+
+
+def test_cover_selector_matches_main_slot_empty_and_filled(tip_page):
+    from bilibili_upload.selectors import css
+
+    cover = tip_page.locator(css("cover"))
+    assert cover.count() == 1 and tip_page.locator(css("cover_disabled")).count() == 0
+    safe_click(cover)
+    assert tip_page.evaluate("window.coverClicked") == 1
+    tip_page.evaluate("""document.querySelector('#slot').innerHTML =
+        '<div class="cover-img" id="coverimg" style="width:160px;height:90px"><span class="edit-text">更换封面</span></div>'""")
+    assert tip_page.locator(css("cover")).count() == 1  # 主封面位置有图时；封面测试区（pk）的不算
+    safe_click(tip_page.locator(css("cover")))
+    tip_page.evaluate("document.querySelector('#slot').classList.add('cover-slot-disabled')")
+    assert tip_page.locator(css("cover_disabled")).count() == 1

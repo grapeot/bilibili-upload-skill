@@ -4,7 +4,7 @@ import pytest
 
 import bilibili_upload
 from bilibili_upload.guard import (
-    FORBIDDEN_TEXTS, ForbiddenClick, click_verdict, focus_verdict, forbidden_reason, safe_click,
+    FORBIDDEN_TEXTS, PICK_POINT_JS, ForbiddenClick, click_verdict, focus_verdict, forbidden_reason, safe_click,
 )
 
 
@@ -60,11 +60,17 @@ def test_focus_verdict():
 
 
 class FakeHandle:
-    def __init__(self, report):
+    def __init__(self, report, pos=None):
         self.report = report
+        self.pos = pos
         self.clicked = False
+        self.click_kw = None
+        self.inspected_at = "unset"
 
-    def evaluate(self, js):
+    def evaluate(self, js, arg=None):
+        if js == PICK_POINT_JS:
+            return self.pos
+        self.inspected_at = arg
         return self.report
 
     def scroll_into_view_if_needed(self, **kw):
@@ -72,6 +78,7 @@ class FakeHandle:
 
     def click(self, **kw):
         self.clicked = True
+        self.click_kw = kw
 
 
 class FakeLocator:
@@ -100,6 +107,19 @@ def test_safe_click_clicks_the_checked_handle():
     h = FakeHandle({"self": {"text": "公开可见", "cls": "check-radio-v2-container"}})
     safe_click(FakeLocator(h))
     assert h.clicked is True
+
+
+def test_safe_click_checks_and_clicks_the_same_point():
+    pos = {"x": 12.0, "y": 5.0}
+    h = FakeHandle({"self": {"text": "更多设置", "cls": "label"}}, pos=pos)
+    safe_click(FakeLocator(h))
+    assert h.inspected_at == pos and h.click_kw.get("position") == pos
+
+
+def test_safe_click_without_alternative_point_checks_center():
+    h = FakeHandle({"self": {"text": "公开可见", "cls": "x"}})
+    safe_click(FakeLocator(h))
+    assert h.inspected_at is None and "position" not in h.click_kw
 
 
 def test_forbidden_list_covers_required_words():

@@ -31,7 +31,11 @@ SELECTORS: dict[str, Selector] = {
     "dialog_close": Selector(".bcc-dialog__close", "弹窗右上角的关闭按钮（x）"),
     # 基本信息
     "title": Selector(".video-title input.input-val", "标题输入框"),
-    "cover": Selector(".cover-module .cover-img", "封面区域（点击打开「封面制作」弹窗）"),
+    # 主封面位置：已有封面时是 .cover-img；还没有封面（上传中、尚未截帧）时是「添加封面」.cover-empty
+    "cover": Selector(".cover-module-main .cover-slot .cover-img, .cover-module-main .cover-slot .cover-empty",
+                      "主封面位置（点击打开「封面制作」弹窗）"),
+    "cover_disabled": Selector(".cover-module-main .cover-slot-disabled, .cover-module-main .cover-empty-disabled",
+                               "主封面位置处于不可编辑状态（点了不会打开弹窗）"),
     "cover_file_input": Selector("input[type=file][accept*=image]", "封面弹窗里唯一的图片文件输入框（在弹窗内查找）"),
     "cover_confirm": Selector(".cover-editor-content .cover-editor-button .button.submit", "封面弹窗的「完成」（守卫对它有限定范围的放行）"),
     "statement_trigger": Selector(".creation-statement-container .bcc-select .bcc-select-input-wrap", "创作声明下拉框（点击展开）"),
