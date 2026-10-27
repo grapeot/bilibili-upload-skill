@@ -16,6 +16,7 @@ def test_plan_order_and_stop(write_meta, good_meta):
         assert s in steps
     assert any("立即投稿" in h for h in plan["human_steps"])
     assert any("字幕" in h for h in plan["human_steps"])
+    assert any("合集" in h for h in plan["human_steps"])
 
 
 def test_plan_reuse_tab_skips_file_selection(write_meta, good_meta):
